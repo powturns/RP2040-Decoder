@@ -1,0 +1,34 @@
+
+; A duration between 52 and 64us is a 1
+; A duration between 90 and 10000 us is a 0
+; clock setup is
+
+.program dcc_decoder
+
+.define THRESHOLD 87  ; µs to distinguish 1 (short) vs 0 (long)
+
+;.wrap_target:
+    set y, 0
+
+rising_edge:
+    wait 1 pin 0         ; Wait for rising edge of high pulse
+    set x, THRESHOLD     ; Reset high-time counter
+
+count_high:
+    jmp pin count_loop
+    jmp classify         ; the pin has gone low, classify it
+count_loop:
+    jmp x-- count_high   ; Count µs high
+    ; Fall through when x reaches 0
+
+classify:
+    jmp !x is_zero       ; if x has been exhausted, then it must be a zero
+    set x, 1           ; Default: bit = 1
+is_zero:
+    set x, 0
+    in x 1
+
+; now isr contains the bit
+    push
+
+;.wrap

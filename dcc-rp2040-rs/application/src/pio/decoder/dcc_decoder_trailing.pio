@@ -1,0 +1,79 @@
+; with inspiration from:
+;   https://gist.github.com/sonnny/06969a708c279418b9730cd486ff7a97
+;   https://www.nmra.org/sites/default/files/standards/sandrp/DCC/bulliten_feb_1994_dcc.pdf
+; A duration between 52 and 64us is a 1
+; A duration between 90 and 10000 us is a 0
+
+; After the pin goes high we want to delay for 75us
+; and check if the pin is still high. If it is, then it's
+; a zero, otherwise it's a 1
+
+; To wait for 75us, with a max delay of 32, we want each
+; clock cycle to take 2.5 us
+
+.program dcc_decoder
+
+.define PREAMBLE_BITS 10 ; MINIMUM 10 "1"s
+.define PREAMBLE_BITS_WITH_END 9 ; The end packet bit can count towards the first preamble bit
+.define ZERO_DELAY 30; number of cycles to delay after which a bit is considered a zero (30 * 2.5 = 75us)
+
+; a preamble is a MINIMUM of 10 bits with the value 1
+; the packet end bit may count as one of the 10 preamble bits
+
+new_preamble:
+    set x, PREAMBLE_BITS
+preamble_candidate:
+    wait 0 pin 0                ; wait for the pin to go low
+    wait 1 pin 0 [ZERO_DELAY-1] ; once the pain goes high wait 75us
+    jmp pin new_preamble       ; the pin is still high after 75ms - it must be a zero - invalid preamble
+    jmp x-- preamble_candidate
+
+    ; if we've made it this far, we have a valid preamble, now we need to find the packet start bit (a zero)
+    ; Since there is a MINIMUM of 10 1's before a start bit, we can continue to accept 1s
+packet_start:
+    wait 0 pin 0                ; wait for the pin to go low
+    wait 1 pin 0 [ZERO_DELAY-1] ; once the pain goes high wait 75us
+    jmp pin baseline_packet     ; If the pin is high, it's a zero, so start decoding the address
+    jmp packet_start            ; else the pin is low, it must have been another one, wait for the next bit
+
+; Packet format is
+; 8 bit address
+; one or more framed data bytes:
+    ; data start bit - value "0"
+    ; 8 bit data
+; packet end bit - value "1" (may count as the first bit in a preamble)
+
+; A baseline packet is:
+; 8 bit address
+; instruction data byte
+; error detection data byte
+
+baseline_packet:
+    set x, 3                            ; outer loop counter - read 3 bytes
+    read_packet_byte:
+        set y,8                         ; read 8 bits
+        read_packet_bits:
+            wait 0 pin 0                ; wait for the pin to go low
+            wait 1 pin 0 [ZERO_DELAY-1] ; once the pain goes high wait 75us
+            in pins, 1                  ; shift left into ISR
+            jmp y-- read_packet_bits
+        wait 0 pin 0
+        wait 1 pin 0 [ZERO_DELAY-1]     ; once the pain goes high wait to determine if it's a zero
+        jmp x-- data_start_bit          ; if we haven't read 3 bytes, we should get a start data bit next (a "0")
+                                        ; at this point we should be at the end of the packet and we're expecting a "1"
+        jmp pin clear_isr               ; if the pin is high, it must be a zero, which is invalid
+
+        push                            ; push the ISR to the host. It must be complimented because it's currently
+                                        ; representing 1s as 0s and vice versa
+
+        set x, PREAMBLE_BITS_WITH_END   ; since end packet bit can be used as the first bit in the preamble, reduce
+        jmp preamble_candidate          ; the number of required bits by one and jump immediately to the candidate
+                                        ; evaluation
+
+data_start_bit:
+    jmp pin read_packet_byte            ; if the pin is high, then its a "0", so continue the outer loop, otherwise
+                                        ; fall through to clear_isr
+clear_isr:
+    ; TODO: so long as we arent using autopush, probably not necessary to clear
+    ;in null, 32  ; Clears ISR by shifting in 32 zeros
+

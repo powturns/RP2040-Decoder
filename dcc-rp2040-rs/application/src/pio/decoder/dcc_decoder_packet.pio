@@ -1,0 +1,82 @@
+; dcc_packet_decoder_with_preamble.pio
+; Requires 10+ 1-bits before starting to accumulate bytes
+; Assumes 1μs per instruction cycle (set clock_div accordingly)
+
+; The preamble counter and unlock flag are stored in the y register
+; When we are locked, we are still waiting for the preamble to come
+; in. We move to the unlocked state after 10 1's followed by a 0.
+; In the unlock state we read the next byte and push it to rust
+;   y[7] = unlocked flag
+;   y[0-3] = count of 1s in preamble (2^4 = 16)
+
+.program dcc_decoder
+.side_set 0
+
+.define THRESHOLD 87  ; µs to distinguish 1 (short) vs 0 (long)
+
+.wrap_target
+    set y, 0
+
+rising_edge:
+    wait 1 pin 0         ; Wait for rising edge of high pulse
+    set x, 0             ; Reset high-time counter
+
+count_high:
+    jmp pin count_loop
+    jmp classify         ; the pin has gone low, classify it
+count_loop:
+    jmp x++ count_high   ; Count µs high
+    ; Fall through when pin goes low
+
+classify:
+    mov osr, x           ; Copy pulse duration
+    set isr, 1           ; Default: bit = 1
+    jmp osr THRESHOLD is_zero
+    jmp check_state
+is_zero:
+    set isr, 0
+
+; at this point the bit we just read is stored in isr
+
+check_state:
+    mov x, y
+    mov osr, y
+    and x, 0x7F          ; Extract preamble count
+    mov y, osr           ; Restore Y
+    jmp y 7 unlocked     ; If unlocked, go accumulate bits
+
+    ; --- LOCKED STATE ---
+    jmp isr got_one
+
+    ; got a 0 while locked
+    jmp x 9 unlock       ; If 10+ 1s before this 0, unlock
+    set y, 0             ; Not enough 1s, reset counter
+    jmp wrap_target
+
+got_one:
+    ; Increment preamble counter (max 127)
+    jmp x 126 maxed
+    add x, 1
+    jmp set_y
+maxed:
+    set x, 127
+set_y:
+    and y, 0x80          ; Preserve unlock flag (0)
+    or y, x              ; y = [unlocked bit (0)] | preamble count
+    jmp wrap_target
+
+unlock:
+    set y, 0x80          ; Set unlocked flag (bit 7), clear count
+    jmp wrap_target
+
+unlocked:
+    ; We're unlocked: shift in bit to ISR
+    in isr, 1
+    mov x, isr
+    jmp x 7 not_full
+    push block           ; Push byte to FIFO
+    mov isr, null
+not_full:
+    jmp wrap_target
+
+.wrap_target

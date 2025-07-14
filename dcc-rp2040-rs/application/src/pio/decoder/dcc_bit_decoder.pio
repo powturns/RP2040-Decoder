@@ -1,0 +1,8 @@
+.program dcc_bit_decoder
+
+
+wait 0 pin 0                ; wait for the pin to go low
+wait 1 pin 0 [29]          ; once the pain goes high wait 75us
+in pins, 1                  ; shift the current level of the pin to the in register. If it is low, then its a 1
+                            ; if it's high, then a zero
+push
