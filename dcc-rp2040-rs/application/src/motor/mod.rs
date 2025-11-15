@@ -1,0 +1,268 @@
+pub mod handler;
+use crate::MotorResources;
+use embassy_rp::gpio::Pull;
+
+use embassy_rp::adc;
+use embassy_rp::adc::{Adc, Async, Channel};
+use embassy_rp::pwm;
+use embassy_rp::pwm::{Pwm, PwmError, PwmOutput};
+use embassy_rp::{Peri, dma};
+use embassy_time::{Duration, Timer};
+use embedded_hal::pwm::SetDutyCycle;
+use math::filtered_mean;
+
+use motor::{Direction, VelocitySetpoint};
+
+const ADC_CALIBRATION_ITERATIONS: usize = 8192;
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Error {
+    Pwm(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] pwm::PwmError),
+    Adc(adc::Error),
+}
+
+impl From<pwm::PwmError> for Error {
+    fn from(value: PwmError) -> Self {
+        Self::Pwm(value)
+    }
+}
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub struct Config {
+    pub pwm_max_output: u16,
+
+    #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
+    pub pwm_clk_divider: fixed::FixedU16<fixed::types::extra::U4>,
+
+    pub emf_measurement_delay: Duration,
+}
+
+pub struct RpMotorController<DMA: dma::Channel> {
+    config: Config,
+    dir: Direction,
+    fwd: DirectionControl,
+    rev: DirectionControl,
+    adc: Adc<'static, Async>,
+    pub dma: Peri<'static, DMA>,
+}
+
+impl<DMA: dma::Channel> RpMotorController<DMA> {
+    pub fn new(
+        config: Config,
+        resources: MotorResources,
+        adc: Adc<'static, Async>,
+        dma: Peri<'static, DMA>,
+    ) -> Self {
+        let mut pwm_config = pwm::Config::default();
+        pwm_config.compare_a = 0;
+        pwm_config.compare_b = 0;
+        pwm_config.top = config.pwm_max_output; // FIXME: c code subtracts 1
+        pwm_config.divider = config.pwm_clk_divider;
+
+        let pwm = Pwm::new_output_ab(
+            resources.pwm_slice,
+            resources.rev_pin,
+            resources.fwd_pin,
+            pwm_config,
+        );
+
+        let (rev_out, fwd_out) = pwm.split();
+
+        let fwd = DirectionControl::new(
+            fwd_out.unwrap(),
+            Channel::new_pin(resources.fwd_emf_in, Pull::None),
+        );
+
+        let rev = DirectionControl::new(
+            rev_out.unwrap(),
+            Channel::new_pin(resources.rev_emf_in, Pull::None),
+        );
+
+        Self {
+            config,
+            dir: Direction::Forward,
+            fwd,
+            rev,
+            adc,
+            dma,
+        }
+    }
+
+    /// Measure the back emf of the motor.
+    async fn measure(&mut self) -> Result<f32, Error> {
+        // FIXME: restore the levels after the measurement?
+        self.fwd.stop()?;
+        self.rev.stop()?;
+
+        // FIXME: use a configurable sample size
+        const SAMPLE_CNT: usize = 100; //CV_ARRAY_FLASH[60]
+
+        let buf = &mut [0; SAMPLE_CNT];
+
+        Timer::after(self.config.emf_measurement_delay).await;
+
+        match self.dir {
+            Direction::Forward => {
+                self.fwd
+                    .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+                    .await?
+            }
+            Direction::Reverse => {
+                self.rev
+                    .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+                    .await?
+            }
+        }
+
+        buf.sort_unstable();
+
+        // outlier removal - FIXME: use a configurable cutoff value
+        let l_side_arr_cutoff = 15; // CV_ARRAY_FLASH[62]
+        let r_side_arr_cutoff = 15; // CV_ARRAY_FLASH[63]
+
+        let filtered_cnt = SAMPLE_CNT - (l_side_arr_cutoff + r_side_arr_cutoff);
+
+        let sum: u32 = buf
+            .iter()
+            .skip(l_side_arr_cutoff)
+            .take(filtered_cnt)
+            .map(|&x| x as u32)
+            .sum();
+
+        Ok(sum as f32 / filtered_cnt as f32)
+    }
+}
+
+impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
+    type Error = Error;
+    /// Measures the back emf ADC values when the motor isn't running.
+    async fn measure_adc_offset(&mut self) -> Result<u16, Error> {
+        let buf = &mut [0; ADC_CALIBRATION_ITERATIONS];
+
+        self.stop()?;
+
+        Timer::after_secs(1).await;
+
+        debug!("Measuring ADC offset in reverse direction. n={}", buf.len());
+        let _ = &mut self
+            .rev
+            .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+            .await?;
+        let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
+        debug!("offset_avg_rev={}", offset_avg_rev);
+
+        Timer::after_secs(1).await;
+        debug!("Measuring ADC offset in forward direction. n={}", buf.len());
+        let _ = &mut self
+            .fwd
+            .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+            .await?;
+        let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
+        debug!("offset_avg_fwd={}", offset_avg_fwd);
+
+
+        Ok(((offset_avg_fwd as u32 + offset_avg_rev as u32) / 2) as u16)
+    }
+    /// Acknowledge a CV rd/wr instruction by pulsing the motor in both directions
+    async fn acknowledge_cv(&mut self) -> Result<(), Error> {
+        self.stop()?;
+
+        // FIXME: we want to ack but we dont want to trip the programming track current
+        self.fwd.set_output_percent(50)?;
+        Timer::after_millis(3).await;
+        self.fwd.stop()?;
+
+        self.rev.set_output_percent(50)?;
+        Timer::after_millis(3).await;
+        self.rev.stop()?;
+
+        Ok(())
+    }
+    fn stop(&mut self) -> Result<(), Error> {
+        self.fwd.stop()?;
+        self.rev.stop()?;
+        Ok(())
+    }
+
+    fn set_output_level(&mut self, pwm_level: u16, direction: Direction) -> Result<(), Error> {
+        self.dir = direction;
+
+        match direction {
+            Direction::Forward => {
+                self.rev.stop()?;
+                self.fwd.set_output(pwm_level)?;
+            }
+            Direction::Reverse => {
+                self.fwd.stop()?;
+                self.rev.set_output(pwm_level)?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+pub trait Controller {
+    type Error;
+
+    /// Measures the back emf ADC values when the motor isn't running.
+    async fn measure_adc_offset(&mut self) -> Result<u16, Self::Error>;
+    /// Acknowledge a CV rd/wr instruction by pulsing the motor in both directions
+    async fn acknowledge_cv(&mut self) -> Result<(), Self::Error>;
+    fn stop(&mut self) -> Result<(), Self::Error>;
+    fn set_output_level(&mut self, level: u16, direction: Direction) -> Result<(), Error>;
+}
+
+struct DirectionControl {
+    motor_pwm: PwmOutput<'static>,
+    emf: Channel<'static>,
+}
+
+impl DirectionControl {
+    pub fn new(motor_pwm: PwmOutput<'static>, emf: Channel<'static>) -> Self {
+        Self { motor_pwm, emf }
+    }
+
+    /// Measures the emf using the [adc] into the [buf].
+    async fn measure_emf(
+        &mut self,
+        adc: &mut Adc<'_, Async>,
+        buf: &mut [u16],
+        dma: Peri<'_, impl dma::Channel>,
+    ) -> Result<(), Error> {
+        adc.read_many(
+            &mut self.emf,
+            buf,
+            0, // sample at the full 500,000 samples per second
+            dma,
+        )
+        .await
+        .map_err(Error::Adc)?;
+
+        Ok(())
+    }
+
+    fn set_output(&mut self, duty_cycle: u16) -> Result<(), Error> {
+        Ok(self.motor_pwm.set_duty_cycle(duty_cycle)?)
+    }
+
+    fn set_output_percent(&mut self, percent: u8) -> Result<(), Error> {
+        debug_assert!(percent <= 100);
+        Ok(self.motor_pwm.set_duty_cycle_percent(percent.max(100))?)
+    }
+
+    fn stop(&mut self) -> Result<(), Error> {
+        Ok(self.motor_pwm.set_duty_cycle_fully_off()?)
+    }
+}
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Command {
+    AcknowledgeCv,
+
+    Reset,
+
+    /// A 128 speed step velocity setpoint.
+    SetVelocity128(VelocitySetpoint),
+}

@@ -1,0 +1,23 @@
+[package]
+name = "motor"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+defmt = { version = "1.0.1", optional = true }
+discrete_pid = { version = "0.1.0", default-features = false }
+
+[dev-dependencies]
+assert_float_eq = "1.2.0"
+
+[features]
+default = [
+]
+
+defmt = [
+    "dep:defmt",
+]
+
+debug = []
+
+verbose = []
