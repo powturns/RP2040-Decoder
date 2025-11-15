@@ -621,7 +621,7 @@ static void track_signal_fall() {
     else bit = 1;
     input_bit_buffer <<= 1;
     input_bit_buffer |= bit;
-    // Check if input buffer contains a valid dcc packet
+    // Check if input buffer contains a valid transport packet
     // number_of_bytes contains the length of the packet when detected, otherwise -1
     dcc_r_buf.packets[dcc_r_buf.wr_idx].length = detect_dcc_packet();
     if (dcc_r_buf.packets[dcc_r_buf.wr_idx].length != INVALID_PACKAGE) {

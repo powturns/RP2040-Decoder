@@ -48,12 +48,12 @@
 
 /**
  * @def RING_BUFFER_PACKETS
- * @brief First dimension of dcc ring buffer array - meaning RING_BUFFER_PACKETS can be retained inside the buffer
+ * @brief First dimension of transport ring buffer array - meaning RING_BUFFER_PACKETS can be retained inside the buffer
  */
 #define RING_BUFFER_PACKETS 8
 /**
  * @def RING_BUFFER_BYTES
- * @brief Secoond dimension of dcc ring buffer array - meaning each packet can have a maximum size of RING_BUFFER_BYTES
+ * @brief Secoond dimension of transport ring buffer array - meaning each packet can have a maximum size of RING_BUFFER_BYTES
  */
 #define RING_BUFFER_BYTES 5
 
@@ -356,7 +356,7 @@ static size_t detect_dcc_packet();
  * Bytes are ordered as follows:
  * Start of transmission -> byte_n(address byte) -> ... -> byte_0(error detection byte) -> end of transmission
  * 
- * \param packet Pointer to dcc packet struct which contains data and length of packet.
+ * \param packet Pointer to transport packet struct which contains data and length of packet.
  */
 static void bits_to_dcc_packet_data(dcc_packet_t * packet);
 

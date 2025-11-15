@@ -1,0 +1,102 @@
+use embassy_rp::dma::Channel;
+use fixed::traits::ToFixed;
+
+use dcc::transport::{Decoder, RawDccDecoder};
+use embassy_rp::Peri;
+use embassy_rp::gpio::Pull;
+use embassy_rp::pio::program::pio_file;
+use embassy_rp::pio::{
+    Common, Config, Direction as PioDirection, FifoJoin, Instance, LoadedProgram, PioPin,
+    ShiftDirection, StateMachine,
+};
+
+pub fn pio_decoder<'d, T: Instance, C: Channel, const SM: usize>(
+    pio: &mut Common<'d, T>,
+    sm: StateMachine<'d, T, SM>,
+    dcc_input: Peri<'d, impl PioPin + 'd>,
+    dma: Peri<'d, C>,
+) -> Decoder<PioDccDecoder<'d, T, C, SM>> {
+    let prg = PioDccDecoderProgram::new(pio);
+    let decoder1 = PioDccDecoder::new(pio, sm, dcc_input, dma, &prg);
+
+    Decoder::new(decoder1)
+}
+
+/// A DCC decoder program loaded into pio instruction memory
+struct PioDccDecoderProgram<'a, PIO: Instance> {
+    prg: LoadedProgram<'a, PIO>,
+}
+
+impl<'a, PIO: Instance> PioDccDecoderProgram<'a, PIO> {
+    /// Load the program into the given pio
+    fn new(common: &mut Common<'a, PIO>) -> Self {
+        let prg = pio_file!("src/transport/dcc_decoder.pio");
+        let prg = common.load_program(&prg.program);
+        Self { prg }
+    }
+}
+
+/// Pio backed DCC decoder.
+pub struct PioDccDecoder<'d, T: Instance, C: Channel, const SM: usize> {
+    sm: StateMachine<'d, T, SM>,
+    dma: Peri<'d, C>,
+}
+
+impl<'d, T: Instance, C: Channel, const SM: usize> PioDccDecoder<'d, T, C, SM> {
+    /// Configure a state machine with the loaded [PioEncoderProgram]
+    fn new(
+        pio: &mut Common<'d, T>,
+        mut sm: StateMachine<'d, T, SM>,
+        dcc_input: Peri<'d, impl PioPin + 'd>,
+        dma: Peri<'d, C>,
+        program: &PioDccDecoderProgram<'d, T>,
+    ) -> Self {
+        let mut dcc_input = pio.make_pio_pin(dcc_input);
+
+        dcc_input.set_pull(Pull::Up);
+        sm.set_pin_dirs(PioDirection::In, &[&dcc_input]);
+
+        let mut cfg = Config::default();
+        cfg.use_program(&program.prg, &[]);
+        cfg.set_in_pins(&[&dcc_input]);
+        cfg.set_jmp_pin(&dcc_input);
+        cfg.fifo_join = FifoJoin::RxOnly;
+
+        // use a clock divider that produces 2.5us per instruction:
+        // The main clock runs at 125MHZ, we want to figure out what to scale that
+        // by to make each cycle take 2.5us.
+        // 1_000_000 us in a second / 2.5 us = 400_000
+
+        cfg.clock_divider = (embassy_rp::clocks::clk_sys_freq() as f64 / 400_000.0).to_fixed();
+
+        // cfg.clock_divider = (U56F8!(125_000_000) / 400_000).to_fixed();
+
+        cfg.shift_in.direction = ShiftDirection::Left;
+        cfg.shift_in.auto_fill = true;
+        cfg.shift_in.threshold = 32;
+
+        sm.set_config(&cfg);
+        sm.set_enable(true);
+
+        Self { sm, dma }
+    }
+}
+
+impl<'d, T: Instance, C: Channel, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, C, SM> {
+    async fn read<'a>(&mut self, buff: &'a mut [u8]) -> &'a [u8] {
+        let rx = self.sm.rx();
+
+        let din: &mut [u32] = bytemuck::cast_slice_mut(buff);
+        rx.dma_pull(self.dma.reborrow(), din, true).await;
+
+        let len = 7 - buff[7] as usize;
+        let buff = &mut buff[..len];
+        for byte in buff.iter_mut() {
+            *byte = !*byte;
+        }
+
+        trace!("{:03} ({:08b})", buff, buff,);
+
+        buff
+    }
+}

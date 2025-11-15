@@ -1,0 +1,99 @@
+; with inspiration from:
+;   https://gist.github.com/sonnny/06969a708c279418b9730cd486ff7a97
+;   https://www.nmra.org/sites/default/files/standards/sandrp/DCC/bulliten_feb_1994_dcc.pdf
+; A duration between 52 and 64us is a 1
+; A duration between 90 and 10000 us is a 0
+
+; After the pin goes high we want to delay for 75us
+; and check if the pin is still high. If it is, then it's
+; a zero, otherwise it's a 1
+
+; To wait for 75us, with a max delay of 32, we want each
+; clock cycle to take 2.5 us
+
+.program dcc_decoder
+
+.define PREAMBLE_BITS 10 ; MINIMUM 10 "1"s
+.define PREAMBLE_BITS_WITH_END 9 ; The end packet bit can count towards the first preamble bit
+.define ZERO_DELAY 30; number of cycles to delay after which a bit is considered a zero (30 * 2.5 = 75us)
+
+; a preamble is a MINIMUM of 10 bits with the value 1
+; the packet end bit may count as one of the 10 preamble bits
+
+new_preamble:
+    set x, PREAMBLE_BITS
+preamble_candidate:
+    wait 0 pin 0                ; wait for the pin to go low
+    wait 1 pin 0 [ZERO_DELAY-1] ; once the pain goes high wait 75us
+    jmp pin new_preamble        ; if the pin is still high after 75ms - it must be a `0` - invalid preamble
+    jmp x-- preamble_candidate  ; wait for an additional `1`
+
+    ; if we've made it this far, we have a valid preamble, now we need to find the packet start bit (a zero)
+    ; Since there is a MINIMUM of 10 1's before a start bit (there could be more), we can continue to accept 1s
+packet_start:
+    wait 0 pin 0                ; wait for the pin to go low
+    wait 1 pin 0 [ZERO_DELAY-1] ; once the pain goes high wait 75us
+    jmp pin packet              ; If the pin is high, it's a `0`, so start decoding the first data bit
+    jmp packet_start            ; else the pin is low, it must have been another `1`, wait for the next bit
+
+; A baseline packet is 3 data bytes, consisting of:
+; address byte
+; instruction data byte
+; error detection byte
+
+; An extended packet is 3-6 data bytes, consisting of:
+; one or two address bytes (primary / extended)
+; one to three instruction data bytes
+; error detection byte
+
+packet:
+    set x, 7                            ; we are going to push 8 bytes for every packet.
+                                        ; this keeps track of the remaining padding. We need
+                                        ; to save the final byte to store the padding length. FIXME: this doesnt work for advanced extended packets. We should consider pushing every time x gets to zero then reset x
+    read_packet_byte:
+        set y, 7                        ; read 8 bits
+        read_packet_bit:
+            wait 0 pin 0                ; wait for the pin to go low
+            wait 1 pin 0 [ZERO_DELAY-1] ; once the pain goes high wait 75us
+            in pins, 1                  ; shift into ISR, possibly triggering an autopush - these bits will need to be inverted
+            jmp y-- read_packet_bit
+
+    ; we just read a byte, decrement the byte padding count by 1
+    jmp x-- check_more_data
+    ; TODO: I think this is where we'd push if x reaches zero. but we have to worry about exact alignment so we dont push
+    ;       x here AND push x again down below. Then the decoder code should be able to accumulate data up to the max extended packet size
+
+    check_more_data:
+        ; read the next bit to determine if its the beginning of another data byte (a zero)
+        ; or the end of the packet (a one)
+        wait 0 pin 0
+        wait 1 pin 0 [ZERO_DELAY-1]     ; once the pain goes high wait to determine if it's a `0`
+
+        jmp pin read_packet_byte        ; if the pin is high, then its a `0`, so there's another data byte to read
+                                        ; otherwise it's a `1`, indicating the end of the packet
+
+    ; Now X contains the number of padding bytes needed (0-7)
+    ; Save padding count in Y before we use X for the padding loop
+    mov y, x                            ; Y = padding count
+
+    ; subtract 1 from X, otherwise we add one too
+    ; many bytes of padding
+    ; TODO: we should check to see if x is zero before doing this?
+    ;jmp x-- padding_loop
+
+    ; Pad with null bytes
+    padding_loop:
+        jmp !x, padding_done            ; don't add padding if x is 0
+        in null, 8                      ; shift in 8 `0` bits
+        jmp x-- padding_loop            ; decrement and continue
+
+    padding_done:
+    ; Now shift in the padding length (stored in Y) as the final byte
+    in y, 8
+
+    ;push                                ; push the ISR to the host. It must be complimented because it's currently
+                                         ; representing 1s as 0s and vice versa
+
+    set x, PREAMBLE_BITS_WITH_END       ; since end packet bit can be used as the first bit in the preamble, reduce
+    jmp preamble_candidate              ; the number of required bits by one and jump immediately to the candidate
+                                        ; evaluation
