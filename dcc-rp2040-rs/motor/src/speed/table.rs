@@ -19,8 +19,11 @@ fn build(config: Config) -> [u16;SPEED_TABLE_LEN] {
     // Segment 1 (indices 1..=63): v_min -> v_mid
     // Segment 2 (indices 64..=126): v_mid -> v_max
 
+    // don't multiply by 16 here as we want higher resolution at low speeds.
     let v_min = config.v_start as f32;
-    let v_mid = config.v_mid as f32 * 16.0; //TODO: why multiply by 16?
+
+    // multiply by 16 to scale the values to the 12-bit adc range.
+    let v_mid = config.v_mid as f32 * 16.0;
     let v_max = config.v_high as f32 * 16.0;
 
     let mut table = [0u16; SPEED_TABLE_LEN];

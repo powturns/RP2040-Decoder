@@ -51,25 +51,14 @@ pub struct SpeedPidConfig {
     /// CV 51 / 10_000
     pub kd: f32,
 
-    /// Minimum controller output. Usually 0.0 for a PWM duty lower bound.
-    pub output_min: f32,
-
     /// Maximum controller output (PWM top).
     ///
     /// FIXME
     /// (float) (_125M / (CV9 * 100 + 10000));
     pub output_max: f32,
 
-    /// Use derivative on measurement instead of error (matches C implementation).
-    pub derivative_on_measurement: bool,
-
     /// Use strict causal integrator (updates I after output), closer to C ordering.
     pub strict_causal_integrator: bool,
-
-    /// ADC offset to subtract from the measurement before control.
-    ///
-    /// CV 172
-    pub adc_offset: f32,
 
     /// Optional feed-forward scaling factor (k_ff in C). If you compute feedforward
     /// externally, you can pass None at runtime to override this per call.
@@ -96,29 +85,32 @@ pub struct SpeedPidConfig {
     pub max_setpoint: f32,
 }
 
-impl Default for SpeedPidConfig {
-    fn default() -> Self {
-        Self {
-            sample_time_ms: 10,
-            filter_tau_s: 0.01,
-            ki: 0.01,
-            kd: 0.0,
-            output_min: 0.0,
-            output_max: f32::INFINITY,
-            derivative_on_measurement: true,
-            strict_causal_integrator: true,
-            adc_offset: 0.0,
-            kff: 0.0,
-            motion_threshold: 7.5,
-            kp_gain_range1_end: 0.5,
-            kp_y0: 1.0,
-            kp_y1: 1.0,
-            kp_y2: 1.0,
-            max_setpoint: 1.0,
-        }
-    }
-}
+// impl Default for SpeedPidConfig {
+//     fn default() -> Self {
+//         Self {
+//             sample_time_ms: 10,
+//             filter_tau_s: 0.01,
+//             ki: 0.01,
+//             kd: 0.0,
+//             output_min: 0.0,
+//             output_max: f32::INFINITY,
+//             derivative_on_measurement: true,
+//             strict_causal_integrator: true,
+//             kff: 0.0,
+//             motion_threshold: 7.5,
+//             kp_gain_range1_end: 0.5,
+//             kp_y0: 1.0,
+//             kp_y1: 1.0,
+//             kp_y2: 1.0,
+//             max_setpoint: 1.0,
+//         }
+//     }
+// }
 
+/// Helper struct to compute Kp based on the setpoint range.
+///
+/// Often it is favorable to have a higher proportional gain KP for slow speeds, achieving
+///  better control results.
 struct GainRange {
     setpoint_range: Range<f32>,
     kp_start: f32,
@@ -126,6 +118,8 @@ struct GainRange {
 }
 
 impl GainRange {
+
+    /// Creates a new GainRange, calculating the slope based on the range, start and end arguments.
     fn new(
         setpoint_range: Range<f32>,
         kp_start: f32,
@@ -146,6 +140,10 @@ impl GainRange {
 
     fn get_kp(&self, setpoint: f32) -> f32 {
         self.slope * (setpoint - self.setpoint_range.start) + self.kp_start
+    }
+
+    fn contains(&self, setpoint: f32) -> bool {
+        self.setpoint_range.contains(&setpoint)
     }
 }
 
@@ -172,8 +170,8 @@ impl SpeedPid {
         lib_cfg.set_kd(cfg.kd)?;
         lib_cfg.set_filter_tc(cfg.filter_tau_s)?;
         lib_cfg.set_sample_time(Duration::from_millis(cfg.sample_time_ms))?;
-        lib_cfg.set_output_limits(cfg.output_min, cfg.output_max)?;
-        lib_cfg.set_use_derivative_on_measurement(cfg.derivative_on_measurement);
+        lib_cfg.set_output_limits(0.0, cfg.output_max)?;
+        lib_cfg.set_use_derivative_on_measurement(true);
         lib_cfg.set_use_strict_causal_integrator(cfg.strict_causal_integrator);
 
         let pid = PidController::new_uninit(lib_cfg);
@@ -207,15 +205,11 @@ impl SpeedPid {
     }
 
     /// Computes the scheduled Kp based on the provided setpoint.
-    ///
-    /// Often it is favorable to have a higher proportional gain KP for slow speeds, achieving
-    /// better control results.
-    /// 
     fn kp_for_setpoint(&self, sp: f32) -> f32 {
-        if sp < self.kp_x1 {
-            self.kp_m1 * sp + self.params.kp_y0
+        if self.gain_range_low.contains(sp) {
+            self.gain_range_low.get_kp(sp)
         } else {
-            self.kp_m2 * (sp - self.kp_x1) + self.params.kp_y1
+            self.gain_range_high.get_kp(sp)
         }
     }
 
@@ -238,39 +232,30 @@ impl SpeedPid {
 
     /// Compute a control output.
     ///
-    /// - `measurement`: latest measured value (same units as the setpoint), prior to offset removal
-    /// - `setpoint`: desired target value
+    /// - `measurement`: latest measured back emf value, corrected for ADC offset.
+    /// - `setpoint`: desired target value (back emf value)
     /// - `timestamp_ms`: current time in milliseconds
-    /// - `feedforward`: Optional feedforward term. If None, uses kff*setpoint as a simple default.
+    /// - `feedforward`: feedforward term
     pub fn compute(
         &mut self,
         measurement: f32,
         setpoint: f32,
         timestamp_ms: u64,
-        feedforward: Option<f32>,
+        feedforward: f32,
     ) -> f32 {
-        // Correct measurement by ADC offset
-        let input = measurement - self.params.adc_offset;
-
         // Dynamic Kp scheduling based on setpoint
         let kp = self.kp_for_setpoint(setpoint);
         // Update Kp; ignore error since kp>0 by construction in normal operation
-        let _ = self.pid.config_mut().set_kp(kp.max(core::f32::EPSILON));
+        let _ = self.pid.config_mut().set_kp(kp);
 
         // Anti-windup policy based on current saturation and error direction
-        let error = setpoint - input;
+        let error = setpoint - measurement;
         self.update_integrator_activity(error);
-
-        // Compute feedforward
-        let ff = match feedforward {
-            Some(v) => Some(v),
-            None => Some(self.params.kff * setpoint),
-        };
 
         // Compute control output
         let out = self
             .pid
-            .compute(input, setpoint, time::Millis(timestamp_ms), ff);
+            .compute(measurement, setpoint, time::Millis(timestamp_ms), Some(feedforward));
         out
     }
 
