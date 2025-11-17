@@ -53,6 +53,12 @@ dependencies = [
 ]
 
 [[package]]
+name = "assert_float_eq"
+version = "1.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd9777fd8234cccd34019d9e26d70c8247f9baf24c8fdc0b56c548cf943af2ed"
+
+[[package]]
 name = "assign-resources"
 version = "0.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -850,6 +856,7 @@ checksum = "f52b00d39961fc5b2736ea853c9cc86238e165017a493d1d5c8eac6bdc4cc273"
 name = "motor"
 version = "0.1.0"
 dependencies = [
+ "assert_float_eq",
  "defmt 1.0.1",
  "discrete_pid",
 ]

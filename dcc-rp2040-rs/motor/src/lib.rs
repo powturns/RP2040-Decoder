@@ -2,7 +2,6 @@
 extern crate alloc;
 
 mod speed;
-mod pid;
 
 #[derive(Eq, PartialEq, Copy, Clone)]
 #[cfg_attr(test, derive(core::fmt::Debug))]

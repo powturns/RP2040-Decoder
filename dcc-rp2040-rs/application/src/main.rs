@@ -8,6 +8,7 @@ mod cv;
 mod transport;
 mod timer;
 mod motor;
+mod math;
 
 #[allow(unused_imports)]
 #[cfg(feature = "probe-rs")]

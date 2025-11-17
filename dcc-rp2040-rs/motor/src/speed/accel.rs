@@ -54,13 +54,13 @@ struct Config {
     loop_delay: Duration, // FIXME: default to 7ms
 }
 
-struct AccelHelper {
+struct Helper {
     config: Config,
     target: SpeedTarget,
     current: SpeedTarget,
 }
 
-impl AccelHelper {
+impl Helper {
     fn new(config: Config) -> Self {
         Self {
             config,
@@ -182,14 +182,14 @@ mod tests {
     #[test]
     fn test_new_speed_control() {
         let config = default_config();
-        let control = AccelHelper::new(config);
+        let control = Helper::new(config);
         assert_eq!(control.current, SpeedTarget::default());
         assert_eq!(control.target, SpeedTarget::default());
     }
 
     #[test]
     fn test_set_target() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
         let new_target = SpeedTarget {
             speed_step: SpeedStep::Num(50),
             direction: Direction::Forward,
@@ -200,7 +200,7 @@ mod tests {
 
     #[test]
     fn test_step_when_at_target_returns_max_delay() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
         let (current, delay) = control.step();
         assert_eq!(current, SpeedTarget::default());
         assert_eq!(delay, Duration::MAX);
@@ -208,7 +208,7 @@ mod tests {
 
     #[test]
     fn test_acceleration_with_rate() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
         control.set_target(SpeedTarget {
             speed_step: SpeedStep::Num(10),
             direction: Direction::Forward,
@@ -223,7 +223,7 @@ mod tests {
 
     #[test]
     fn test_acceleration_steps_gradually() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
         control.set_target(SpeedTarget {
             speed_step: SpeedStep::Num(5),
             direction: Forward,
@@ -243,7 +243,7 @@ mod tests {
 
     #[test]
     fn test_acceleration_without_rate_jumps_immediately() {
-        let mut control = AccelHelper::new(config_no_ramp());
+        let mut control = Helper::new(config_no_ramp());
         control.set_target(SpeedTarget {
             speed_step: SpeedStep::Num(50),
             direction: Direction::Forward,
@@ -255,7 +255,7 @@ mod tests {
 
     #[test]
     fn test_deceleration_with_rate() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
 
         // Start at control 10
         control.current = SpeedTarget {
@@ -277,7 +277,7 @@ mod tests {
 
     #[test]
     fn test_deceleration_steps_gradually() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
 
         // Start at control 5
         control.current = SpeedTarget {
@@ -306,7 +306,7 @@ mod tests {
 
     #[test]
     fn test_deceleration_without_rate_jumps_immediately() {
-        let mut control = AccelHelper::new(config_no_ramp());
+        let mut control = Helper::new(config_no_ramp());
 
         control.current = SpeedTarget {
             speed_step: SpeedStep::Num(50),
@@ -325,7 +325,7 @@ mod tests {
 
     #[test]
     fn test_emergency_stop_immediate() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
 
         control.current = SpeedTarget {
             speed_step: SpeedStep::Num(50),
@@ -344,7 +344,7 @@ mod tests {
 
     #[test]
     fn test_direction_change_decelerates_to_stop_first() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
 
         // Start moving forward at control 3
         control.current = SpeedTarget {
@@ -380,7 +380,7 @@ mod tests {
 
     #[test]
     fn test_direction_change_without_decel_rate_switches_immediately() {
-        let mut control = AccelHelper::new(config_no_ramp());
+        let mut control = Helper::new(config_no_ramp());
 
         control.current = SpeedTarget {
             speed_step: SpeedStep::Num(50),
@@ -400,7 +400,7 @@ mod tests {
 
     #[test]
     fn test_direction_change_from_stop() {
-        let mut control = AccelHelper::new(default_config());
+        let mut control = Helper::new(default_config());
 
         control.current = SpeedTarget {
             speed_step: SpeedStep::Stop,
@@ -428,7 +428,7 @@ mod tests {
 
     #[test]
     fn test_full_acceleration_cycle() {
-        let mut control = AccelHelper::new(Config {
+        let mut control = Helper::new(Config {
             accel_rate: 5,
             decel_rate: 5,
             loop_delay: Duration::from_millis(10),
@@ -454,7 +454,7 @@ mod tests {
 
     #[test]
     fn test_full_deceleration_cycle() {
-        let mut control = AccelHelper::new(Config {
+        let mut control = Helper::new(Config {
             accel_rate: 5,
             decel_rate: 5,
             loop_delay: Duration::from_millis(10),

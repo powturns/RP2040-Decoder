@@ -12,6 +12,8 @@ use embedded_hal::pwm::SetDutyCycle;
 use fixed::FixedU16;
 use fixed::types::extra::U3;
 
+const ADC_CALIBRATION_ITERATIONS:usize = 8192;
+
 pub struct MotorController<DMA: dma::Channel> {
     dir: Direction,
     fwd: DirectionControl,
@@ -90,6 +92,16 @@ impl <DMA: dma::Channel> MotorController<DMA>{
         let sum:u32 = buf.iter().skip(l_side_arr_cutoff).take(filtered_cnt).map(|&x| x as u32).sum();
 
         Ok(sum as f32/filtered_cnt as f32)
+    }
+
+    async fn adc_offset_adjustment(&mut self) {
+        let buf = &mut [0; ADC_CALIBRATION_ITERATIONS];
+
+        info!("Measuring ADC offset in reverse direction. n={}", buf.len());
+        &mut self.fwd.measure_emf(&mut self.adc, buf, self.dma.reborrow()).await.unwrap();
+
+
+        info!("Measuring ADC offset in forward direction. n={}", buf.len());
     }
 }
 
