@@ -87,22 +87,22 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> FlashStore<'d, T, FLASH_SIZE> {
 }
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Store for FlashStore<'d, T, FLASH_SIZE> {
-    fn read_cv(&self, address: usize) -> u8 {
+    fn read_byte(&self, address: usize) -> u8 {
         self.cache[address - 1]
     }
 
-    fn read_range(&self, start: usize, len: usize) -> &[u8] {
+    fn read_bytes(&self, start: usize, len: usize) -> &[u8] {
         let start_idx = start - 1;
         let end_idx = start_idx + len;
         self.cache[start_idx..end_idx].as_ref()
     }
 
-    fn write_cv(&mut self, address: usize, value: u8) -> Result<(), Error> {
+    fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error> {
         self.cache[address - 1] = value;
-        self.write_range(address, &[value])
+        self.write_bytes(address, &[value])
     }
 
-    fn write_range(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
+    fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
         let start_idx = start - 1;
         self.cache[start_idx..start_idx + value.len()].copy_from_slice(value);
         self.sync_cvs()

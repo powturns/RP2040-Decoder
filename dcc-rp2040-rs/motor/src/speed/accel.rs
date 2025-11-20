@@ -143,10 +143,11 @@ impl Helper {
 mod tests {
     #[cfg(test)]
     extern crate std;
+    extern crate alloc;
 
-    use super::*;
     use alloc::vec;
     use alloc::vec::Vec;
+    use super::*;
 
     fn default_config() -> Config {
         Config {

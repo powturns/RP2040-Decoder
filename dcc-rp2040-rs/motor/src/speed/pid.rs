@@ -15,7 +15,9 @@ use discrete_pid::pid::{PidConfig, PidConfigError, PidController};
 use discrete_pid::time::Millis;
 use discrete_pid::{pid, time};
 
-#[derive(Debug, Eq, PartialEq)]
+#[derive(Eq, PartialEq)]
+#[cfg_attr(test, derive(core::fmt::Debug))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     ConfigError(PidConfigError),
 }
@@ -31,12 +33,12 @@ impl From<PidConfigError> for Error {
 /// The application is expected to fill this from its control variables (CVs) or
 /// other configuration sources.
 #[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
-    /// Sampling time in milliseconds (matches the C sampling period CV).
-    pub sample_time_ms: u64,
+    pub sample_time: Duration,
 
-    /// Low-pass filter time constant (seconds) used on the derivative term (tau in C).
-    pub filter_tau_s: f32,
+    /// Low-pass filter time constant used on the derivative term.
+    pub filter_tc: Duration,
 
     /// Time-invariant integral gain (ki). The library scales this by the sample time.
     ///
@@ -54,7 +56,7 @@ pub struct Config {
     ///
     /// FIXME
     /// (float) (_125M / (CV9 * 100 + 10000));
-    pub output_max: f32,
+    pub output_max: u16,
 
     /// Gain scheduling parameters for Kp based on the setpoint.
     /// Defines the position of the end of the first gain range based on a fraction of the [max_setpoint].
@@ -77,6 +79,7 @@ pub struct Config {
 ///
 /// Often it is favorable to have a higher proportional gain KP for slow speeds, achieving
 ///  better control results.
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 struct GainRange {
     setpoint_range: Range<f32>,
     kp_start: f32,
@@ -131,9 +134,9 @@ impl Controller {
         lib_cfg.set_kp(1.0)?; // placeholder; will be updated dynamically per setpoint
         lib_cfg.set_ki(cfg.ki)?;
         lib_cfg.set_kd(cfg.kd)?;
-        lib_cfg.set_filter_tc(cfg.filter_tau_s)?;
-        lib_cfg.set_sample_time(Duration::from_millis(cfg.sample_time_ms))?;
-        lib_cfg.set_output_limits(0.0, cfg.output_max)?;
+        lib_cfg.set_filter_tc(cfg.filter_tc.as_secs_f32())?;
+        lib_cfg.set_sample_time(cfg.sample_time)?;
+        lib_cfg.set_output_limits(0.0, cfg.output_max as f32)?;
         lib_cfg.set_use_derivative_on_measurement(true);
         lib_cfg.set_use_strict_causal_integrator(true);
 
@@ -200,19 +203,19 @@ impl Controller {
         setpoint: f32,
         timestamp_ms: u64,
         feedforward: f32,
-    ) -> u16 {
+    ) -> Result<u16, Error> {
         let setpoint = setpoint.clamp(0.0, self.params.max_setpoint);
         // Dynamic Kp scheduling based on setpoint
         let kp = self.kp_for_setpoint(setpoint);
-        let _ = self.pid.config_mut().set_kp(kp); // FIXME: error handling
+        self.pid.config_mut().set_kp(kp)?; // FIXME: error handling
 
         // Compute control output
-        self.pid.compute(
+        Ok(self.pid.compute(
             measurement,
             setpoint,
             Millis(timestamp_ms),
             Some(feedforward),
-        ) as u16
+        ) as u16)
     }
 
     /// Returns the most recent output value from the underlying PID controller.
@@ -229,11 +232,11 @@ mod tests {
     fn default_cv_config() -> Config {
         let max_setpoint = 1600.0; //CV_5  -    V_max               -   Default = 100*16
         Config {
-            sample_time_ms: 5,                                    //CV_49 = 5   -> Ts = 5 ms
-            filter_tau_s: 0.010, // CV_48 = 10 -> tau = 10 ms -> 0.010 s
+            sample_time: Duration::from_millis(5),                                    //CV_49 = 5   -> Ts = 5 ms
+            filter_tc: Duration::from_millis(10), // CV_48 = 10 -> tau = 10 ms -> 0.010 s
             ki: 2.5, //CV_50  -   PID Control I_Factor        =   CV_50/10        Default = 25 -> 2.5
             kd: 0.005, //CV_51  -   PID Control D_Factor        =   CV_51/10000     Default = 50 -> 0.005
-            output_max: 125000000.0 / (150 * 100 + 10000) as f32, // CV_9  -    PWM frequency in Hz = CV_9*100+10000    - Default = (150*100+10000)Hz = 25kHz
+            output_max: (125000000.0 / (150 * 100 + 10000) as f32) as u16, // CV_9  -    PWM frequency in Hz = CV_9*100+10000    - Default = (150*100+10000)Hz = 25kHz
             kp_gain_range1_end: 13.0 / 255.0, //CV_60  -   x_1 shift in % = CV_60/255
             kp_y0: 20.0,
             kp_y1: 2.5,
@@ -284,15 +287,14 @@ mod tests {
         // Use a large feedforward to force saturation and verify clamping.
         let measurement = 0.0;
         let setpoint = cfg.max_setpoint * 10.0; // will be clamped internally to max_setpoint
-        let ff = cfg.output_max; // large feedforward to reach upper limit
-        let out = pid.compute(measurement, setpoint, 0, ff);
+        let ff = cfg.output_max as f32; // large feedforward to reach upper limit
+        let out = pid.compute(measurement, setpoint, 0, ff).unwrap();
 
-        assert!(out >= 0.0, "output should be >= 0");
+        assert!(out >= 0, "output should be >= 0");
         assert!(
-            out <= cfg.output_max + f32::EPSILON,
+            out <= cfg.output_max,
             "output should be <= output_max"
         );
-        assert_f32_near!(out, pid.last_output());
     }
     //endregion
 

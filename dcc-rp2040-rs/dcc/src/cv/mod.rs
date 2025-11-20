@@ -26,6 +26,9 @@ enum Cv {
     /// 
     DecelerationRate = 4,
 
+    /// PWM frequency in Hz = CV_9*100+10000
+    MotorPwmFrequency = 9,
+
     /// The Extended Address when the decoder is set up for extended addressing
     /// (indicated by a value of "1" in bit location 5 of CV#29).
     ///
@@ -46,6 +49,41 @@ enum Cv {
     /// - Bit 7: Decoder type. 0 = Multifunction; 1 = Accessory (see CV541 for bits 0–6 on accessory decoders).
     DecoderConfiguration = 29,
 
+    /// Feed-forward factor k_ff in % = CV_47/255
+    PidFf = 47,
+
+    /// CV_48  -   PID Control low pass filter time constant (tau) in ms
+    PidFilterTc = 48,
+
+    ///CV_49  -   PID Control sampling time t in ms
+    PidSampleTime = 49,
+
+    /// PID Control I_Factor        =   CV_50/10
+    PidKi = 50,
+
+    /// PID Control D_Factor        =   CV_51/10000
+    PidKd = 51,
+
+    ///CV_52  -   PID Integral Limit positive =   CV_52*10
+    PidILimitHigh = 52,
+
+    /// CV_53  -   PID Integral Limit negative =   CV_53*(-10)
+    PidILimitLow = 53,
+
+    /// k_p @ x0 = CV_54 / 100
+    PidKpY0 = 54,
+
+    /// k_p @ x1 = CV_56/ 100
+    PidKpY1 = 56,
+
+    /// k_p @ = CV_58 / 100
+    PidKpY2 = 58,
+
+
+    /// Gain range shift.
+    /// Percent calculated from CV_60/255
+    PidKpGainRange1End = 60,
+
     /// Number of samples when reading back EMF
     EmfMsrSamples = 61,
 
@@ -59,11 +97,16 @@ enum Cv {
     /// Number of largest samples to discard when calculating emf (outliers)
     EmfMsrHighCutoff = 64,
 
+    /// Offset applied to the ADC when calculating the back emf.
+    /// 255 = offset not measured
+    EmfAdcOffset = 172,
+
+    /// Additional motor pwm clock divider.
+    MotorPwmDivider = 174,
+
     /// How frequently the control is updated from the control table.
     SpeedStepPeriod = 175,
 
-    /// Offset applied to the ADC when calculating the back emf.
-    EmfAdcOffset = 172,
 }
 
 const DEFAULT_VALUES: [u8; CV_SIZE] = [

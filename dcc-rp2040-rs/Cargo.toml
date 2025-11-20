@@ -1,7 +1,7 @@
 [workspace]
 resolver = "2"
 
-members = ["application", "dcc", "motor"]
+members = ["application", "dcc", "math", "motor"]
 
 [profile.dev]
 debug = 2

@@ -1,7 +1,7 @@
 #![no_std]
-extern crate alloc;
+mod log;
 
-mod speed;
+pub mod speed;
 
 #[derive(Eq, PartialEq, Copy, Clone)]
 #[cfg_attr(test, derive(core::fmt::Debug))]

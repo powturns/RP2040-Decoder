@@ -71,7 +71,7 @@ where T: Timer, S: Store {
 
     fn verify_byte(&self, packet:Packet) -> Result<Option<Op>, Error> {
         let expected = packet.cv_data()?;
-        let actual = self.store.read_cv(packet.cv_address()? as usize);
+        let actual = self.store.read_byte(packet.cv_address()? as usize);
 
         let op = if expected == actual {
             Some(Op::AcknowledgeCv)
@@ -85,7 +85,7 @@ where T: Timer, S: Store {
     fn write_byte(&mut self, packet:Packet) -> Result<Option<Op>, Error> {
         // TODO: we dont allow writing every cv!, some are reserved for special operations!
 
-        self.store.write_cv(packet.cv_address()? as usize, packet.cv_data()?)?;
+        self.store.write_byte(packet.cv_address()? as usize, packet.cv_data()?)?;
 
         Ok(Some(AcknowledgeCv))
     }
@@ -109,13 +109,13 @@ where T: Timer, S: Store {
         let bit_pos = packed & 0b0000_0111; // BBB
 
         let cv_addr = packet.cv_address()? as usize;
-        let current = self.store.read_cv(cv_addr);
+        let current = self.store.read_byte(cv_addr);
         let mask = 1u8 << bit_pos;
 
         if is_write {
             // Write Bit operation - branchless bit manipulation
             let new_val = (current & !mask) | (d_val << bit_pos);
-            self.store.write_cv(cv_addr, new_val)?;
+            self.store.write_byte(cv_addr, new_val)?;
             Ok(Some(AcknowledgeCv))
         } else {
             // Bit Verify operation - direct XOR comparison

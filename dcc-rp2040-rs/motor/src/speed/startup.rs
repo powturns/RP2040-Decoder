@@ -2,6 +2,8 @@ use crate::speed::{CONTROLLER_HANDOVER};
 
 const BASE_PWM_ARR_LEN:usize = 16;
 
+#[derive(Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// Maximum controller output (PWM top).
     ///
@@ -31,7 +33,7 @@ pub struct Controller {
 
 impl Controller {
 
-    fn new(config: Config) -> Self {
+    pub(crate) fn new(config: Config) -> Self {
         Self {
             config,
             prev_start_output: [0;BASE_PWM_ARR_LEN],

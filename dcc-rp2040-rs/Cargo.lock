@@ -21,6 +21,8 @@ dependencies = [
  "embedded-hal 1.0.0",
  "fixed",
  "fixed-macro",
+ "math",
+ "motor",
  "panic-probe",
  "panic-reset",
  "portable-atomic",
@@ -826,6 +828,12 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2874a2af47a2325c2001a6e6fad9b16a53b802102b528163885171cf92b15976"
 
 [[package]]
+name = "libm"
+version = "0.2.15"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "f9fbbcab51052fe104eb5e5d351cf728d30a5be1fe14d9be8a3b097481fb97de"
+
+[[package]]
 name = "litrs"
 version = "0.4.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -845,6 +853,13 @@ name = "log"
 version = "0.4.28"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "34080505efa8e45a4b816c349525ebe327ceaa8559756f0356cba97ef3bf7432"
+
+[[package]]
+name = "math"
+version = "0.1.0"
+dependencies = [
+ "libm",
+]
 
 [[package]]
 name = "memchr"

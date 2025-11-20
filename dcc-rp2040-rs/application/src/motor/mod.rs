@@ -1,18 +1,21 @@
-mod speed;
-
+use defmt::export::usize;
 use embassy_rp::gpio::{AnyPin, Input, Output, Pull};
 use embedded_hal::digital::{InputPin, OutputPin};
 use crate::MotorResources;
 
-use embassy_rp::adc::{Adc, Async, Channel, Config, InterruptHandler};
+use embassy_rp::adc::{Adc, Async, Channel, Config as AdcConfig, InterruptHandler};
 use embassy_rp::{dma, Peri};
 use embassy_rp::pwm::{Pwm, PwmOutput};
 use embassy_rp::pwm;
 use embedded_hal::pwm::SetDutyCycle;
-use fixed::FixedU16;
-use fixed::types::extra::U3;
+use math::filtered_mean;
 
 const ADC_CALIBRATION_ITERATIONS:usize = 8192;
+
+pub struct Config {
+    pub pwm_max_output: u16,
+    pub pwm_clk_divider: fixed::FixedU16<fixed::types::extra::U4>,
+}
 
 pub struct MotorController<DMA: dma::Channel> {
     dir: Direction,
@@ -24,24 +27,23 @@ pub struct MotorController<DMA: dma::Channel> {
 
 impl <DMA: dma::Channel> MotorController<DMA>{
     pub fn new(
+        config: Config,
         resources: MotorResources,
         adc: Adc<'static, Async>,
         dma: Peri<'static, DMA>,
     ) -> Self {
 
-        let mut config = pwm::Config::default();
-        config.compare_a = 0;
-        config.compare_b = 0;
-        //config.top = (_125M / (CV_ARRAY_FLASH[8] * 100 + 10000)) - 1;
-
-        // pwm_set_clkdiv_int_frac(slice_num, CV_ARRAY_FLASH[173], 0);
-        //config.divider =  CV_ARRAY_FLASH[173].into();
+        let mut pwm_config = pwm::Config::default();
+        pwm_config.compare_a = 0;
+        pwm_config.compare_b = 0;
+        pwm_config.top = config.pwm_max_output; // FIXME: c code subtracts 1
+        pwm_config.divider = config.pwm_clk_divider;
 
         let pwm = Pwm::new_output_ab(
             resources.pwm_slice,
             resources.rev_pin,
             resources.fwd_pin,
-            config,
+            pwm_config,
         );
 
         let (rev_out, fwd_out) = pwm.split();
@@ -94,14 +96,20 @@ impl <DMA: dma::Channel> MotorController<DMA>{
         Ok(sum as f32/filtered_cnt as f32)
     }
 
-    async fn adc_offset_adjustment(&mut self) {
+    async fn adc_offset_adjustment(&mut self) -> Result<u16, ()> {
         let buf = &mut [0; ADC_CALIBRATION_ITERATIONS];
 
         info!("Measuring ADC offset in reverse direction. n={}", buf.len());
-        &mut self.fwd.measure_emf(&mut self.adc, buf, self.dma.reborrow()).await.unwrap();
-
+        let _ = &mut self.fwd.measure_emf(&mut self.adc, buf, self.dma.reborrow()).await?;
+        let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
+        info!("offset_avg_fwd={}", offset_avg_fwd);
 
         info!("Measuring ADC offset in forward direction. n={}", buf.len());
+        let _ = &mut self.rev.measure_emf(&mut self.adc, buf, self.dma.reborrow()).await?;
+        let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
+        info!("offset_avg_rev={}", offset_avg_rev);
+
+        Ok((offset_avg_fwd as u32 + offset_avg_rev as u32 / 2) as u16)
     }
 }
 

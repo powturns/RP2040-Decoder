@@ -8,7 +8,6 @@ mod cv;
 mod transport;
 mod timer;
 mod motor;
-mod math;
 
 #[allow(unused_imports)]
 #[cfg(feature = "probe-rs")]
@@ -34,7 +33,7 @@ use embassy_rp::pio;
 use embassy_rp::pio::Pio;
 use embassy_rp::adc;
 use embassy_rp::watchdog::Watchdog;
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex, ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex};
 use embassy_sync::channel::Channel;
 use embassy_time::{Duration, TimeoutError, with_timeout, Instant};
 use static_cell::StaticCell;
@@ -44,12 +43,25 @@ use dcc::transport::PacketError;
 use crate::timer::InstantTimer;
 use assign_resources::assign_resources;
 use embassy_rp::adc::Adc;
+use fixed::types::extra::U4;
+use ::motor::speed::{
+    Config as SpeedConfig,
+    PidConfig,
+    StartupConfig,
+};
+use dcc::cv::store::StoreExt;
+use crate::motor::MotorController;
 
 // Provide FLASH_SIZE from build.rs-generated file.
 include!(concat!(env!("OUT_DIR"), "/flash_consts.rs"));
 
 type RawDecoder = PioDccDecoder<'static, PIO0, DMA_CH0, 0>;
 type AppFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
+
+type Packethandler = Handler<
+    InstantTimer,
+    cv::FlashStore<'static, FLASH, FLASH_SIZE>,
+>;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
@@ -80,12 +92,13 @@ assign_resources! {
         rev_pin: PIN_22,
         rev_emf_in: PIN_28,
         pwm_slice: PWM_SLICE3,
+    }
+    motor_dma: MotorDma {
         dma: DMA_CH2,
     }
 }
 
 static mut CORE1_STACK: Stack<4096> = Stack::new();
-static EXECUTOR0: StaticCell<Executor> = StaticCell::new();
 static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
 // TODO: if we start sending larger packets, consider using https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/zerocopy.rs
@@ -108,14 +121,8 @@ async fn decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDecoder>) {
 }
 
 #[embassy_executor::task]
-async fn handler(flash: AppFlash) {
-    let cv_store =
-        unwrap!(cv::FlashStore::new(flash, APP_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
+async fn handler(mut handler: Packethandler) {
 
-    let mut handler = Handler::new(
-        InstantTimer::new(),
-        cv_store,
-    );
 
     loop {
         // TODO: if a packet hasn't been received within a heartbeat timeout
@@ -141,18 +148,13 @@ async fn handler(flash: AppFlash) {
     }
 }
 
-#[cortex_m_rt::entry]
-fn main() -> ! {
+#[embassy_executor::main]
+async fn main(spawner: Spawner) {
     let p = embassy_rp::init(Default::default());
-
-    // core 0 executor
-    let executor0 = EXECUTOR0.init(Executor::new());
 
     // Override bootloader watchdog
     // let mut watchdog = Watchdog::new(p.WATCHDOG);
     // watchdog.start(Duration::from_secs(8));
-
-
 
     let r = split_resources!(p);
     let dr = r.pio_decoder;
@@ -169,6 +171,46 @@ fn main() -> ! {
 
     let mut adc = Adc::new(p.ADC, Irqs, adc::Config::default());
 
+    let cv_store =
+        unwrap!(cv::FlashStore::new(flash, APP_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
+
+    let output_max = (embassy_rp::clocks::clk_sys_freq() / cv_store.motor_pwm_frequency()) as u16;
+
+    let motor_controller = motor::MotorController::new(
+        motor::Config {
+            pwm_max_output: output_max,
+            pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
+        },
+        r.motor,
+        adc,
+        r.motor_dma.dma
+    );
+
+    let mut speed_control = SpeedConfig::new(
+        PidConfig {
+            sample_time: cv_store.pid_sample_time(),
+            filter_tc: cv_store.pid_filter_tc(),
+            ki: cv_store.pid_ki(),
+            kd: cv_store.pid_kd(),
+            output_max,
+            kp_gain_range1_end: cv_store.pid_kp_gain_range1_end(),
+            kp_y0: cv_store.pid_kp_y0(),
+            kp_y1: cv_store.pid_kp_y1(),
+            kp_y2: cv_store.pid_kp_y2(),
+            max_setpoint: 0.0,
+        },
+        StartupConfig {
+            output_max,
+            pid_ff: cv_store.pid_k_ff(),
+        },
+        todo!()
+    );
+
+    let mut packet_handler = Handler::new(
+        InstantTimer::new(),
+        cv_store,
+    );
+
     // start execution on core1
     spawn_core1(
         p.CORE1,
@@ -177,13 +219,11 @@ fn main() -> ! {
             trace!("starting core1");
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
-                spawner.must_spawn(handler(flash));
+                spawner.must_spawn(handler(packet_handler));
             });
         },
     );
 
-    executor0.run(|spawner| {
-        spawner.must_spawn(decoder(/*watchdog,*/ d));
-    });
+    spawner.must_spawn(decoder(/*watchdog,*/ d));
 }
 

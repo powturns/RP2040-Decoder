@@ -1,4 +1,6 @@
+use core::time::Duration;
 use crate::cv::Cv;
+use crate::cv::Cv::*;
 use crate::read_extended_address;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
@@ -30,32 +32,163 @@ impl core::fmt::Display for Error {
 /// Writes occur very infrequently so can be relatively slow.
 pub trait Store {
     /// Reads a single configuration variable.
-    fn read_cv(&self, address: usize) -> u8;
+    fn read_byte(&self, address: usize) -> u8;
 
     /// Reads a range of configuration variables.
-    fn read_range(&self, start: usize, len: usize) -> &[u8];
+    fn read_bytes(&self, start: usize, len: usize) -> &[u8];
 
     /// writes a single configuration variable.
-    fn write_cv(&mut self, address: usize, value: u8) -> Result<(), Error>;
+    fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error>;
 
-    fn write_range(&mut self, start: usize, value: &[u8]) -> Result<(), Error>;
+    fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error>;
+}
+
+pub trait CvValue {
+    const SIZE: usize;
+
+    fn from_store(store: &impl Store, address: usize) -> Self;
+}
+
+impl CvValue for u8 {
+    const SIZE: usize = size_of::<u8>();
+
+    fn from_store(store: &impl Store, address: usize) -> Self {
+        store.read_byte(address)
+    }
+}
+
+impl CvValue for u16 {
+    const SIZE: usize = size_of::<u16>();
+
+    fn from_store(store: &impl Store, address: usize) -> Self {
+        let buf = store.read_bytes(address, Self::SIZE);
+        u16::from_be_bytes(buf.try_into().expect("Store returned insufficient bytes"))
+    }
+}
+
+impl CvValue for u32 {
+    const SIZE: usize = size_of::<u32>();
+    fn from_store(store: &impl Store, address: usize) -> Self {
+        let buf = store.read_bytes(address, Self::SIZE);
+        u32::from_be_bytes(buf.try_into().expect("Store returned insufficient bytes"))
+    }
 }
 
 pub trait StoreExt {
+    fn read_cv<V:CvValue>(&self, address: usize) -> V;
+
     /// Reads the address from the store.
     fn addr(&self) -> u16;
+
+    /// Sample time for the PID controller.
+    fn pid_sample_time(&self) -> Duration;
+
+    /// PID ki term
+    fn pid_ki(&self) -> f32;
+
+    /// PID kd term
+    fn pid_kd(&self) -> f32;
+
+    /// Low pass filter time constant.
+    fn pid_filter_tc(&self) -> Duration;
+
+    /// Position of the end of range1 as a percentage of the
+    /// max output
+    fn pid_kp_gain_range1_end(&self) -> f32;
+    fn pid_kp_y0(&self) -> f32;
+
+    fn pid_kp_y1(&self) -> f32;
+
+    fn pid_kp_y2(&self) -> f32;
+
+    /// Feed forward factor for the PID controller.
+    fn pid_k_ff(&self) -> f32;
+
+    fn emf_l_side_cutoff(&self) -> u8;
+    fn emf_r_side_cutoff(&self) -> u8;
+
+    fn motor_pwm_frequency(&self) -> u32;
+
+    fn emf_adc_offset(&self) -> Option<u8>;
+
+    fn motor_pwm_divider(&self) -> u8
 }
 
 impl <T:Store> StoreExt for T {
+    fn read_cv<V: CvValue>(&self, address: usize) -> V {
+        V::from_store(self, address)
+    }
+
     fn addr(&self) -> u16 {
         // check if we are an extended address
-        if 0b00100000 & self.read_cv(Cv::DecoderConfiguration as usize) != 0 {
+        if 0b00100000 & self.read_byte(DecoderConfiguration as usize) != 0 {
             return read_extended_address(
-                self.read_range(Cv::ExtendedAddressMsb as usize, 2)
+                self.read_bytes(ExtendedAddressMsb as usize, 2)
             );
         }
 
-        self.read_cv(Cv::PrimaryAddress as usize) as u16
+        self.read_byte(PrimaryAddress as usize) as u16
+    }
+
+    fn pid_sample_time(&self) -> Duration {
+        Duration::from_millis(self.read_byte(PidSampleTime as usize) as u64)
+    }
+
+    fn pid_ki(&self) -> f32 {
+        self.read_byte(PidKi as usize) as f32 / 10.0
+    }
+
+    fn pid_kd(&self) -> f32 {
+        self.read_byte(PidKd as usize) as f32 / 10000.0
+    }
+
+    fn pid_filter_tc(&self) -> Duration {
+        Duration::from_millis(self.read_byte(PidFilterTc as usize) as u64)
+    }
+
+    fn pid_kp_gain_range1_end(&self) -> f32 {
+        self.read_byte(PidKpGainRange1End as usize) as f32 / 255.0
+    }
+
+    fn pid_kp_y0(&self) -> f32 {
+        self.read_cv::<u16>(PidKpY0 as usize) as f32 / 100.0
+    }
+
+    fn pid_kp_y1(&self) -> f32 {
+        self.read_cv::<u16>(PidKpY1 as usize) as f32 / 100.0
+    }
+
+    fn pid_kp_y2(&self) -> f32 {
+        self.read_cv::<u16>(PidKpY2 as usize) as f32 / 100.0
+    }
+
+    fn pid_k_ff(&self) -> f32 {
+        self.read_byte(PidFf as usize) as f32 / 255.0
+    }
+
+    fn emf_l_side_cutoff(&self) -> u8 {
+        self.read_byte(EmfMsrLowCutoff as usize)
+    }
+
+    fn emf_r_side_cutoff(&self) -> u8 {
+        self.read_byte(EmfMsrHighCutoff as usize)
+    }
+
+    fn motor_pwm_frequency(&self) -> u32 {
+        self.read_byte(MotorPwmFrequency as usize) as u32 * 100 + 1000
+    }
+
+    fn emf_adc_offset(&self) -> Option<u8> {
+        let offset = self.read_byte(EmfAdcOffset as usize);
+        if offset != u8::MAX {
+            Some(offset)
+        } else {
+            None
+        }
+    }
+
+    fn motor_pwm_divider(&self) -> u8 {
+        self.read_byte(MotorPwmDivider as usize)
     }
 }
 
@@ -98,7 +231,7 @@ mod tests {
     }
 
     impl Store for MockStore {
-        fn read_cv(&self, cv_id: usize) -> u8 {
+        fn read_byte(&self, cv_id: usize) -> u8 {
             if (cv_id as usize) < CV_SIZE {
                 self.cvs[cv_id as usize]
             } else {
@@ -106,7 +239,7 @@ mod tests {
             }
         }
 
-        fn read_range(&self, start: usize, len: usize) -> &[u8] {
+        fn read_bytes(&self, start: usize, len: usize) -> &[u8] {
             let start_idx = start as usize;
             if start_idx < CV_SIZE && start_idx + len <= CV_SIZE {
                 &self.cvs[start_idx..start_idx + len]
@@ -115,7 +248,7 @@ mod tests {
             }
         }
 
-        fn write_cv(&mut self, cv_id: usize, value: u8) -> Result<(), Error> {
+        fn write_byte(&mut self, cv_id: usize, value: u8) -> Result<(), Error> {
             if (cv_id as usize) < CV_SIZE {
                 self.cvs[cv_id as usize] = value;
                 Ok(())
@@ -124,7 +257,7 @@ mod tests {
             }
         }
 
-        fn write_range(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
+        fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
             let start_idx = start as usize;
             if start_idx < CV_SIZE && start_idx + value.len() <= CV_SIZE {
                 self.cvs[start_idx..start_idx + value.len()].copy_from_slice(value);
