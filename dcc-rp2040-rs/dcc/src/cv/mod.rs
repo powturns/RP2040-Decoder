@@ -26,6 +26,17 @@ enum Cv {
     /// 
     DecelerationRate = 4,
 
+    /// Voltage drive level at the maximum speed step.
+    ///
+    /// This value shall be specified as a fraction of available rectified supply voltage.
+    VHigh = 5,
+
+    /// Voltage drive level at the middle speed step.
+    ///
+    /// used to generate a performance curve in the decoder that translate speed step values into
+    /// motor voltage drive levels and is specified as a fraction of available rectified supply voltage.
+    VMid = 6,
+
     /// PWM frequency in Hz = CV_9*100+10000
     MotorPwmFrequency = 9,
 

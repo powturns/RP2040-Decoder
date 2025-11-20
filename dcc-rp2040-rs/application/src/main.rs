@@ -48,6 +48,7 @@ use ::motor::speed::{
     Config as SpeedConfig,
     PidConfig,
     StartupConfig,
+    Controller as SpeedController,
 };
 use dcc::cv::store::StoreExt;
 use crate::motor::MotorController;
@@ -105,8 +106,11 @@ static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 // FIXME: use a PubSubChannel instead of a channel so we can evict the oldest value if we cannot process them fast enough
 static PACKET_CHANNEL: Channel<CriticalSectionRawMutex, Packet, 5> = Channel::new();
 
+static MOTOR_CHANNEL: Channel<CriticalSectionRawMutex, motor::Command, 5> = Channel::new();
+
+
 #[embassy_executor::task]
-async fn decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDecoder>) {
+async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDecoder>) {
     info!("starting decoder loop");
     loop {
         let packet = decoder.read().await;
@@ -121,7 +125,35 @@ async fn decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDecoder>) {
 }
 
 #[embassy_executor::task]
-async fn handler(mut handler: Packethandler) {
+async fn packet_handler(mut handler: Packethandler) {
+
+
+    loop {
+        // TODO: if a packet hasn't been received within a heartbeat timeout
+        //       we should execute a reset operation.
+        //       We should probably do the same if we haven received a packet addressed to us
+        //       in a while
+        let packet = PACKET_CHANNEL.receive().await;
+
+        match handler.handle(packet) {
+            Ok(Some(op)) => match op {
+                Op::AcknowledgeCv => {
+                    todo!()
+                }
+            }
+            Ok(None) => {
+                /* noop */
+            }
+            Err(e) => {
+                error!("error handling packet: {:?}", e);
+            }
+        }
+
+    }
+}
+
+#[embassy_executor::task]
+async fn motor_handler(mut handler: Packethandler) {
 
 
     loop {
@@ -159,54 +191,100 @@ async fn main(spawner: Spawner) {
     let r = split_resources!(p);
     let dr = r.pio_decoder;
 
-    let Pio {
-        mut common,
-        sm0, /*sm1,*/
-        ..
-    } = Pio::new(dr.pio, Irqs);
-    let d = transport::pio_decoder(&mut common, sm0, dr.dcc_input, dr.dma);
+    let decoder = {
+        let Pio {
+            mut common,
+            sm0, /*sm1,*/
+            ..
+        } = Pio::new(dr.pio, Irqs);
 
-    let fr = r.flash;
-    let flash = embassy_rp::flash::Flash::<_, Async, FLASH_SIZE>::new(fr.flash, fr.dma);
+        transport::pio_decoder(&mut common, sm0, dr.dcc_input, dr.dma)
+    };
 
-    let mut adc = Adc::new(p.ADC, Irqs, adc::Config::default());
+    let flash = {
+        let fr = r.flash;
+        embassy_rp::flash::Flash::<_, Async, FLASH_SIZE>::new(fr.flash, fr.dma)
+    };
 
-    let cv_store =
+    let mut cv_store =
         unwrap!(cv::FlashStore::new(flash, APP_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
 
     let output_max = (embassy_rp::clocks::clk_sys_freq() / cv_store.motor_pwm_frequency()) as u16;
 
-    let motor_controller = motor::MotorController::new(
-        motor::Config {
-            pwm_max_output: output_max,
-            pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
-        },
-        r.motor,
-        adc,
-        r.motor_dma.dma
-    );
+    let mut motor_controller = {
+        let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
 
-    let mut speed_control = SpeedConfig::new(
-        PidConfig {
-            sample_time: cv_store.pid_sample_time(),
-            filter_tc: cv_store.pid_filter_tc(),
-            ki: cv_store.pid_ki(),
-            kd: cv_store.pid_kd(),
-            output_max,
-            kp_gain_range1_end: cv_store.pid_kp_gain_range1_end(),
-            kp_y0: cv_store.pid_kp_y0(),
-            kp_y1: cv_store.pid_kp_y1(),
-            kp_y2: cv_store.pid_kp_y2(),
-            max_setpoint: 0.0,
-        },
-        StartupConfig {
-            output_max,
-            pid_ff: cv_store.pid_k_ff(),
-        },
-        todo!()
-    );
+        MotorController::new(
+            motor::Config {
+                pwm_max_output: output_max,
+                pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
+            },
+            r.motor,
+            adc,
+            r.motor_dma.dma
+        )
+    };
 
-    let mut packet_handler = Handler::new(
+    let adc_offset = match cv_store.emf_adc_offset() {
+        Some(o) => o,
+        None => {
+            // calculate the offset, and store it in the store
+            debug!("calculating adc offset");
+
+            match motor_controller.measure_adc_offset().await {
+                Ok(measured_offset) => {
+                    if measured_offset >= u8::MAX as u16 {
+                        error!("adc offset is too large: {}, truncating", measured_offset);
+                    }
+                    let measured_offset = measured_offset.clamp(0, (u8::MAX-1) as u16) as u8;
+
+                    unwrap!(cv_store.write_emf_adc_offset(measured_offset));
+                    measured_offset
+                }
+                Err(e) => {
+                    error!("unable to measure adc offset: {:?}. Defaulting to 0", e);
+                    0
+                }
+            }
+        }
+    };
+
+    let table = {
+        use ::motor::speed::table;
+        let config = table::Config {
+            v_start: cv_store.v_start(),
+            v_mid: cv_store.v_mid(),
+            v_high: cv_store.v_high(),
+        };
+
+        table::build(config)
+    };
+
+    let speed_control = {
+        let config = SpeedConfig::new(
+            PidConfig {
+                sample_time: cv_store.pid_sample_time(),
+                filter_tc: cv_store.pid_filter_tc(),
+                ki: cv_store.pid_ki(),
+                kd: cv_store.pid_kd(),
+                output_max,
+                kp_gain_range1_end: cv_store.pid_kp_gain_range1_end(),
+                kp_y0: cv_store.pid_kp_y0(),
+                kp_y1: cv_store.pid_kp_y1(),
+                kp_y2: cv_store.pid_kp_y2(),
+                max_setpoint: *unwrap!(table.last()) as f32,
+            },
+            StartupConfig {
+                output_max,
+                pid_ff: cv_store.pid_k_ff(),
+            },
+            adc_offset as f32,
+        );
+
+        unwrap!(SpeedController::new(config))
+    };
+
+    let packet_handler = Handler::new(
         InstantTimer::new(),
         cv_store,
     );
@@ -219,11 +297,11 @@ async fn main(spawner: Spawner) {
             trace!("starting core1");
             let executor1 = EXECUTOR1.init(Executor::new());
             executor1.run(|spawner| {
-                spawner.must_spawn(handler(packet_handler));
+                spawner.must_spawn(packet_handler(packet_handler));
             });
         },
     );
 
-    spawner.must_spawn(decoder(/*watchdog,*/ d));
+    spawner.must_spawn(packet_decoder(/*watchdog,*/ decoder));
 }
 

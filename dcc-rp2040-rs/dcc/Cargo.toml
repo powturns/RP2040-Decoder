@@ -11,6 +11,9 @@ bytemuck = "1.23.2"
 
 
 [features]
+default = [
+]
+
 defmt = [
     "dep:defmt",
     "heapless/defmt"

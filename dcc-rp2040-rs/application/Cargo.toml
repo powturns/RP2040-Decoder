@@ -54,7 +54,8 @@ defmt = [
     "panic-probe/print-defmt",
 #    "task-watchdog/defmt-embassy-rp"
     "dcc/defmt",
-    "embassy-futures/defmt"
+    "motor/defmt",
+    "embassy-futures/defmt",
 ]
 
 probe-rs = [

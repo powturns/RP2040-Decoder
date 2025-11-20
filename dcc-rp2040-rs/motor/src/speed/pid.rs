@@ -19,7 +19,7 @@ use discrete_pid::{pid, time};
 #[cfg_attr(test, derive(core::fmt::Debug))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
-    ConfigError(PidConfigError),
+    ConfigError(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] PidConfigError),
 }
 
 impl From<PidConfigError> for Error {

@@ -2,7 +2,7 @@ use crate::speed::Mode::{STARTUP, PID};
 use crate::speed::startup::ComputeResult;
 
 mod accel;
-mod table;
+pub mod table;
 mod pid;
 mod startup;
 
@@ -51,7 +51,7 @@ pub struct Controller {
 
 impl Controller {
 
-    fn new(config: Config) -> Result<Self, Error> {
+    pub fn new(config: Config) -> Result<Self, Error> {
         Ok(Self {
             config,
             mode: STARTUP,

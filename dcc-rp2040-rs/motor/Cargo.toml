@@ -12,6 +12,9 @@ discrete_pid = { version = "0.1.0", default-features = false }
 assert_float_eq = "1.2.0"
 
 [features]
+default = [
+]
+
 defmt = [
     "dep:defmt",
 #    "heapless/defmt"

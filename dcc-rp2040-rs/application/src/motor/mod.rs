@@ -1,16 +1,23 @@
-use defmt::export::usize;
 use embassy_rp::gpio::{AnyPin, Input, Output, Pull};
 use embedded_hal::digital::{InputPin, OutputPin};
 use crate::MotorResources;
 
+use embassy_rp::adc;
 use embassy_rp::adc::{Adc, Async, Channel, Config as AdcConfig, InterruptHandler};
 use embassy_rp::{dma, Peri};
 use embassy_rp::pwm::{Pwm, PwmOutput};
 use embassy_rp::pwm;
+use embassy_time::{Delay, Timer};
 use embedded_hal::pwm::SetDutyCycle;
 use math::filtered_mean;
 
 const ADC_CALIBRATION_ITERATIONS:usize = 8192;
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Error {
+    Pwm(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] pwm::PwmError),
+    Adc(adc::Error),
+}
 
 pub struct Config {
     pub pwm_max_output: u16,
@@ -68,7 +75,7 @@ impl <DMA: dma::Channel> MotorController<DMA>{
     }
 
     /// Measure the back emf of the motor.
-    async fn measure(&mut self) -> Result<f32, ()> {
+    async fn measure(&mut self) -> Result<f32, Error> {
         // FIXME: restore the levels after the measurement?
         self.fwd.stop()?;
         self.rev.stop()?;
@@ -96,20 +103,30 @@ impl <DMA: dma::Channel> MotorController<DMA>{
         Ok(sum as f32/filtered_cnt as f32)
     }
 
-    async fn adc_offset_adjustment(&mut self) -> Result<u16, ()> {
+    pub async fn measure_adc_offset(&mut self) -> Result<u16, Error> {
         let buf = &mut [0; ADC_CALIBRATION_ITERATIONS];
 
+        self.stop()?;
+
+        Timer::after_secs(1).await;
         info!("Measuring ADC offset in reverse direction. n={}", buf.len());
         let _ = &mut self.fwd.measure_emf(&mut self.adc, buf, self.dma.reborrow()).await?;
         let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
         info!("offset_avg_fwd={}", offset_avg_fwd);
 
+        Timer::after_secs(1).await;
         info!("Measuring ADC offset in forward direction. n={}", buf.len());
         let _ = &mut self.rev.measure_emf(&mut self.adc, buf, self.dma.reborrow()).await?;
         let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
         info!("offset_avg_rev={}", offset_avg_rev);
 
-        Ok((offset_avg_fwd as u32 + offset_avg_rev as u32 / 2) as u16)
+        Ok(((offset_avg_fwd as u32 + offset_avg_rev as u32)/2) as u16)
+    }
+
+    fn stop(&mut self) -> Result<(), Error> {
+        self.fwd.stop()?;
+        self.rev.stop()?;
+        Ok(())
     }
 }
 
@@ -144,18 +161,23 @@ impl DirectionControl {
         adc: &mut Adc<'_, Async>,
         buf: &mut [u16],
         dma: Peri<'_, impl dma::Channel>
-    ) -> Result<(), ()> {
+    ) -> Result<(), Error> {
         adc.read_many(
             &mut self.emf,
             buf,
             0, // sample at the full 500 khz rate
             dma
-        ).await.map_err(|_| ())?; // FIXME: proper error handling
+        ).await.map_err(|e| Error::Adc(e))?;
 
         Ok(())
     }
 
-    fn stop(&mut self) -> Result<(), ()> {
-        self.motor_pwm.set_duty_cycle(0).map_err(|_| ()) // FIXME: proper error handling
+    fn stop(&mut self) -> Result<(), Error> {
+        self.motor_pwm.set_duty_cycle(0).map_err(|e| Error::Pwm(e))
     }
+}
+
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+pub enum Command {
+
 }

@@ -80,6 +80,10 @@ pub trait StoreExt {
     /// Reads the address from the store.
     fn addr(&self) -> u16;
 
+    fn v_start(&self) -> u8;
+    fn v_high(&self) -> u8;
+    fn v_mid(&self) -> u8;
+
     /// Sample time for the PID controller.
     fn pid_sample_time(&self) -> Duration;
 
@@ -110,8 +114,9 @@ pub trait StoreExt {
     fn motor_pwm_frequency(&self) -> u32;
 
     fn emf_adc_offset(&self) -> Option<u8>;
+    fn write_emf_adc_offset(&mut self, offset: u8) -> Result<(), Error>;
 
-    fn motor_pwm_divider(&self) -> u8
+    fn motor_pwm_divider(&self) -> u8;
 }
 
 impl <T:Store> StoreExt for T {
@@ -128,6 +133,18 @@ impl <T:Store> StoreExt for T {
         }
 
         self.read_byte(PrimaryAddress as usize) as u16
+    }
+
+    fn v_start(&self) -> u8 {
+        self.read_byte(VStart as usize)
+    }
+
+    fn v_high(&self) -> u8 {
+        self.read_byte(VHigh as usize)
+    }
+
+    fn v_mid(&self) -> u8 {
+        self.read_byte(VMid as usize)
     }
 
     fn pid_sample_time(&self) -> Duration {
@@ -185,6 +202,10 @@ impl <T:Store> StoreExt for T {
         } else {
             None
         }
+    }
+
+    fn write_emf_adc_offset(&mut self, offset: u8) -> Result<(), Error> {
+        self.write_byte(EmfAdcOffset as usize, offset)
     }
 
     fn motor_pwm_divider(&self) -> u8 {
