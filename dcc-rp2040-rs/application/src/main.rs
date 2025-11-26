@@ -5,9 +5,9 @@
 pub(crate) mod log;
 
 mod cv;
-mod transport;
-mod timer;
 mod motor;
+mod timer;
+mod transport;
 
 #[allow(unused_imports)]
 #[cfg(feature = "probe-rs")]
@@ -22,36 +22,30 @@ use panic_reset as _;
 use defmt_rtt as _;
 
 // use crate::transport::Decoder;
+use crate::motor::{Command, Controller as MotorController, RpMotorController};
+use crate::timer::InstantTimer;
 use crate::transport::pio_decoder::PioDccDecoder;
-use ::dcc::transport::{Decoder, Packet};
+use ::dcc::transport::{Decoder, packet::Packet};
+use ::motor::speed::{
+    Config as SpeedConfig, Controller as SpeedController, PidConfig, StartupConfig, accel,
+};
+use assign_resources::assign_resources;
+use dcc::cv::store::StoreExt;
+use dcc::handler::{Handler, Op};
 use embassy_executor::{Executor, Spawner};
-use embassy_rp::{bind_interrupts, Peri, peripherals};
+use embassy_rp::adc;
+use embassy_rp::adc::Adc;
 use embassy_rp::flash::{Async, FLASH_BASE, Flash};
-use embassy_rp::multicore::{Stack, spawn_core1};
+use embassy_rp::multicore::Stack;
 use embassy_rp::peripherals::{DMA_CH0, FLASH, PIO0};
 use embassy_rp::pio;
 use embassy_rp::pio::Pio;
-use embassy_rp::adc;
-use embassy_rp::watchdog::Watchdog;
-use embassy_sync::blocking_mutex::raw::{CriticalSectionRawMutex};
+use embassy_rp::{Peri, bind_interrupts, peripherals};
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Channel;
-use embassy_time::{Duration, TimeoutError, with_timeout, Instant};
+use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
+use embassy_time::Duration;
 use static_cell::StaticCell;
-use dcc::handler::{Error, Handler, Op};
-use dcc::is_recipient;
-use dcc::transport::PacketError;
-use crate::timer::InstantTimer;
-use assign_resources::assign_resources;
-use embassy_rp::adc::Adc;
-use fixed::types::extra::U4;
-use ::motor::speed::{
-    Config as SpeedConfig,
-    PidConfig,
-    StartupConfig,
-    Controller as SpeedController,
-};
-use dcc::cv::store::StoreExt;
-use crate::motor::MotorController;
 
 // Provide FLASH_SIZE from build.rs-generated file.
 include!(concat!(env!("OUT_DIR"), "/flash_consts.rs"));
@@ -59,10 +53,7 @@ include!(concat!(env!("OUT_DIR"), "/flash_consts.rs"));
 type RawDecoder = PioDccDecoder<'static, PIO0, DMA_CH0, 0>;
 type AppFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
 
-type Packethandler = Handler<
-    InstantTimer,
-    cv::FlashStore<'static, FLASH, FLASH_SIZE>,
->;
+type Packethandler = Handler<InstantTimer, cv::FlashStore<'static, FLASH, FLASH_SIZE>>;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
@@ -99,25 +90,40 @@ assign_resources! {
     }
 }
 
-static mut CORE1_STACK: Stack<4096> = Stack::new();
-static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
+// static mut CORE1_STACK: Stack<4096> = Stack::new();
+// static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
 // TODO: if we start sending larger packets, consider using https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/zerocopy.rs
 // FIXME: use a PubSubChannel instead of a channel so we can evict the oldest value if we cannot process them fast enough
-static PACKET_CHANNEL: Channel<CriticalSectionRawMutex, Packet, 5> = Channel::new();
+static PACKET_CHANNEL: PubSubChannel<ThreadModeRawMutex, Packet, 5, 1, 0> = PubSubChannel::new();
 
-static MOTOR_CHANNEL: Channel<CriticalSectionRawMutex, motor::Command, 5> = Channel::new();
-
+static MOTOR_CHANNEL: Channel<ThreadModeRawMutex, motor::Command, 5> = Channel::new();
 
 #[embassy_executor::task]
 async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDecoder>) {
-    info!("starting decoder loop");
+    trace!("starting decoder loop");
+
     loop {
         let packet = decoder.read().await;
 
-        info!("addr={} packet={:?}", packet.addr(), packet);
+        debug!("addr={} packet={:?}", packet.addr(), packet);
 
-        PACKET_CHANNEL.try_send(packet);
+        PACKET_CHANNEL.publish_immediate(packet);
+
+        // let mut packet = packet;
+        // loop {
+        //     if let Err(TrySendError::Full(p)) = PACKET_CHANNEL.try_send(packet) {
+        //         // pop the oldest packet off the channel.
+        //         // Note there is a race here if the external consumer pulls the packet off the
+        //         // channel before we do, we'll unnecessarily pop a packet off.
+        //         if let Ok(dropped) = PACKET_CHANNEL.try_receive() {
+        //             info!("packet channel full, dropping packet {:?}", dropped);
+        //         }
+        //         packet = p;
+        //     } else {
+        //         break;
+        //     }
+        // }
 
         // FIXME: come up with a better watchdog
         // watchdog.feed();
@@ -126,59 +132,52 @@ async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDeco
 
 #[embassy_executor::task]
 async fn packet_handler(mut handler: Packethandler) {
+    trace!("starting packet handler loop");
 
-
-    loop {
-        // TODO: if a packet hasn't been received within a heartbeat timeout
-        //       we should execute a reset operation.
-        //       We should probably do the same if we haven received a packet addressed to us
-        //       in a while
-        let packet = PACKET_CHANNEL.receive().await;
-
-        match handler.handle(packet) {
-            Ok(Some(op)) => match op {
-                Op::AcknowledgeCv => {
-                    todo!()
-                }
-            }
-            Ok(None) => {
-                /* noop */
-            }
-            Err(e) => {
-                error!("error handling packet: {:?}", e);
-            }
-        }
-
-    }
-}
-
-#[embassy_executor::task]
-async fn motor_handler(mut handler: Packethandler) {
-
+    let mut receiver = unwrap!(PACKET_CHANNEL.subscriber());
 
     loop {
         // TODO: if a packet hasn't been received within a heartbeat timeout
         //       we should execute a reset operation.
         //       We should probably do the same if we haven received a packet addressed to us
         //       in a while
-        let packet = PACKET_CHANNEL.receive().await;
+        let packet = receiver.next_message_pure().await;
 
-        match handler.handle(packet) {
+        trace!("handling packet: {:?}", packet);
+
+        let op = handler.handle(&packet);
+
+        trace!("packet result: {:?}", op);
+
+        match op {
             Ok(Some(op)) => match op {
-                Op::AcknowledgeCv => {
-                    todo!()
-                }
-            }
-            Ok(None) => {
-                /* noop */
-            }
+                Op::AcknowledgeCv => MOTOR_CHANNEL.send(Command::AcknowledgeCv).await,
+                Op::Reset => MOTOR_CHANNEL.send(Command::Reset).await,
+                Op::Velocity128(sp) => MOTOR_CHANNEL.send(Command::SetVelocity128(sp)).await,
+            },
+            Ok(None) => { /* noop */ }
             Err(e) => {
                 error!("error handling packet: {:?}", e);
             }
         }
-
     }
 }
+
+// #[embassy_executor::task]
+// async fn motor_handler(motor_controller: RpMotorController<DMA_CH2>, speed_control: SpeedController) {
+//     loop {
+//         // TODO: if a packet hasn't been received within a heartbeat timeout
+//         //       we should execute a reset operation.
+//         //       We should probably do the same if we haven received a packet addressed to us
+//         //       in a while
+//         let r = MOTOR_CHANNEL.receiver();
+//         let packet = MOTOR_CHANNEL.receive().await;
+//
+//         match packet {
+//             Command::AcknowledgeCv => {}
+//         }
+//     }
+// }
 
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
@@ -214,14 +213,14 @@ async fn main(spawner: Spawner) {
     let mut motor_controller = {
         let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
 
-        MotorController::new(
+        RpMotorController::new(
             motor::Config {
                 pwm_max_output: output_max,
                 pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
             },
             r.motor,
             adc,
-            r.motor_dma.dma
+            r.motor_dma.dma,
         )
     };
 
@@ -236,7 +235,7 @@ async fn main(spawner: Spawner) {
                     if measured_offset >= u8::MAX as u16 {
                         error!("adc offset is too large: {}, truncating", measured_offset);
                     }
-                    let measured_offset = measured_offset.clamp(0, (u8::MAX-1) as u16) as u8;
+                    let measured_offset = measured_offset.clamp(0, (u8::MAX - 1) as u16) as u8;
 
                     unwrap!(cv_store.write_emf_adc_offset(measured_offset));
                     measured_offset
@@ -249,7 +248,7 @@ async fn main(spawner: Spawner) {
         }
     };
 
-    let table = {
+    let speed_table = {
         use ::motor::speed::table;
         let config = table::Config {
             v_start: cv_store.v_start(),
@@ -272,7 +271,7 @@ async fn main(spawner: Spawner) {
                 kp_y0: cv_store.pid_kp_y0(),
                 kp_y1: cv_store.pid_kp_y1(),
                 kp_y2: cv_store.pid_kp_y2(),
-                max_setpoint: *unwrap!(table.last()) as f32,
+                max_setpoint: *unwrap!(speed_table.last()) as f32,
             },
             StartupConfig {
                 output_max,
@@ -284,24 +283,42 @@ async fn main(spawner: Spawner) {
         unwrap!(SpeedController::new(config))
     };
 
-    let packet_handler = Handler::new(
-        InstantTimer::new(),
-        cv_store,
-    );
+    let accel_helper = {
+        let config = accel::Config {
+            accel_rate: cv_store.acceleration_rate(),
+            decel_rate: cv_store.deceleration_rate(),
+            loop_delay: cv_store.speed_step_period(),
+        };
+
+        accel::Helper::new(config)
+    };
+
+    let pid_sample_time = cv_store.pid_sample_time();
+
+    let ph = Handler::new(InstantTimer::new(), cv_store);
 
     // start execution on core1
-    spawn_core1(
-        p.CORE1,
-        unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
-        move || {
-            trace!("starting core1");
-            let executor1 = EXECUTOR1.init(Executor::new());
-            executor1.run(|spawner| {
-                spawner.must_spawn(packet_handler(packet_handler));
-            });
-        },
-    );
+    // FIXME: bring back this core if we cant do it all on one.
+    // spawn_core1(
+    //     p.CORE1,
+    //     unsafe { &mut *core::ptr::addr_of_mut!(CORE1_STACK) },
+    //     move || {
+    //         trace!("starting core1");
+    //         let executor1 = EXECUTOR1.init(Executor::new());
+    //         executor1.run(|spawner| {
+    //             spawner.must_spawn(packet_handler(ph));
+    //         });
+    //     },
+    // );
 
     spawner.must_spawn(packet_decoder(/*watchdog,*/ decoder));
+    spawner.must_spawn(packet_handler(ph));
+    motor::handler::spawn(
+        spawner,
+        pid_sample_time.try_into().unwrap_or(Duration::from_millis(7)),
+        motor_controller,
+        speed_control,
+        accel_helper,
+        speed_table,
+    );
 }
-

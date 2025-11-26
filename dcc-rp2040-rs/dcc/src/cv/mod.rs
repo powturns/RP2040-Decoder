@@ -4,7 +4,7 @@ pub mod store;
 pub const CV_SIZE: usize = 1024;
 
 #[repr(u16)]
-enum Cv {
+pub(crate) enum Cv {
     /// The primary decoder address.
     ///
     /// Bits 0-6 contain an address with a value between 1 and 127. Bit seven must have a value of "0".
@@ -23,7 +23,7 @@ enum Cv {
     AccelerationRate = 3,
 
     /// Motor deceleration rate.
-    /// 
+    ///
     DecelerationRate = 4,
 
     /// Voltage drive level at the maximum speed step.
@@ -90,7 +90,6 @@ enum Cv {
     /// k_p @ = CV_58 / 100
     PidKpY2 = 58,
 
-
     /// Gain range shift.
     /// Percent calculated from CV_60/255
     PidKpGainRange1End = 60,
@@ -115,9 +114,8 @@ enum Cv {
     /// Additional motor pwm clock divider.
     MotorPwmDivider = 174,
 
-    /// How frequently the control is updated from the control table.
+    /// How frequently the control is updated from the control table (in ms)
     SpeedStepPeriod = 175,
-
 }
 
 const DEFAULT_VALUES: [u8; CV_SIZE] = [

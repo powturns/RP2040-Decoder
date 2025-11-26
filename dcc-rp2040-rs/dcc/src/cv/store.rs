@@ -1,7 +1,6 @@
-use core::time::Duration;
-use crate::cv::Cv;
 use crate::cv::Cv::*;
 use crate::read_extended_address;
+use core::time::Duration;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -21,7 +20,7 @@ impl core::fmt::Display for Error {
         match self {
             Error::Io => {
                 write!(f, "IO error")
-            },
+            }
         }
     }
 }
@@ -75,12 +74,17 @@ impl CvValue for u32 {
 }
 
 pub trait StoreExt {
-    fn read_cv<V:CvValue>(&self, address: usize) -> V;
+    fn read_cv<V: CvValue>(&self, address: usize) -> V;
 
     /// Reads the address from the store.
     fn addr(&self) -> u16;
 
     fn v_start(&self) -> u8;
+
+    fn acceleration_rate(&self) -> u8;
+
+    fn deceleration_rate(&self) -> u8;
+
     fn v_high(&self) -> u8;
     fn v_mid(&self) -> u8;
 
@@ -117,9 +121,11 @@ pub trait StoreExt {
     fn write_emf_adc_offset(&mut self, offset: u8) -> Result<(), Error>;
 
     fn motor_pwm_divider(&self) -> u8;
+
+    fn speed_step_period(&self) -> Duration;
 }
 
-impl <T:Store> StoreExt for T {
+impl<T: Store> StoreExt for T {
     fn read_cv<V: CvValue>(&self, address: usize) -> V {
         V::from_store(self, address)
     }
@@ -127,9 +133,7 @@ impl <T:Store> StoreExt for T {
     fn addr(&self) -> u16 {
         // check if we are an extended address
         if 0b00100000 & self.read_byte(DecoderConfiguration as usize) != 0 {
-            return read_extended_address(
-                self.read_bytes(ExtendedAddressMsb as usize, 2)
-            );
+            return read_extended_address(self.read_bytes(ExtendedAddressMsb as usize, 2));
         }
 
         self.read_byte(PrimaryAddress as usize) as u16
@@ -137,6 +141,14 @@ impl <T:Store> StoreExt for T {
 
     fn v_start(&self) -> u8 {
         self.read_byte(VStart as usize)
+    }
+
+    fn acceleration_rate(&self) -> u8 {
+        self.read_byte(AccelerationRate as usize)
+    }
+
+    fn deceleration_rate(&self) -> u8 {
+        self.read_byte(DecelerationRate as usize)
     }
 
     fn v_high(&self) -> u8 {
@@ -211,6 +223,10 @@ impl <T:Store> StoreExt for T {
     fn motor_pwm_divider(&self) -> u8 {
         self.read_byte(MotorPwmDivider as usize)
     }
+
+    fn speed_step_period(&self) -> Duration {
+        Duration::from_millis(self.read_byte(SpeedStepPeriod as usize) as u64)
+    }
 }
 
 #[cfg(test)]
@@ -219,75 +235,7 @@ mod tests {
     extern crate std;
     use super::*;
     use crate::cv::CV_SIZE;
-
-    // Mock Store implementation for testing
-    struct MockStore {
-        cvs: [u8; CV_SIZE],
-    }
-
-    impl MockStore {
-        fn new() -> Self {
-            MockStore {
-                cvs: [0; CV_SIZE],
-            }
-        }
-
-        fn with_cv(mut self, cv_id: u16, value: u8) -> Self {
-            if (cv_id as usize) < CV_SIZE {
-                self.cvs[cv_id as usize] = value;
-            }
-            self
-        }
-
-        fn with_extended_address(mut self, address: u16) -> Self {
-            // Set extended address bit in CV29
-            let cv29 = self.cvs[29] | 0b00100000;
-            self.cvs[29] = cv29;
-
-            // Set extended address bytes
-            self.cvs[17] = ((address >> 8) & 0x3F) as u8 | 0xC0; // MSB with required bits
-            self.cvs[18] = (address & 0xFF) as u8; // LSB
-            self
-        }
-    }
-
-    impl Store for MockStore {
-        fn read_byte(&self, cv_id: usize) -> u8 {
-            if (cv_id as usize) < CV_SIZE {
-                self.cvs[cv_id as usize]
-            } else {
-                0
-            }
-        }
-
-        fn read_bytes(&self, start: usize, len: usize) -> &[u8] {
-            let start_idx = start as usize;
-            if start_idx < CV_SIZE && start_idx + len <= CV_SIZE {
-                &self.cvs[start_idx..start_idx + len]
-            } else {
-                &[]
-            }
-        }
-
-        fn write_byte(&mut self, cv_id: usize, value: u8) -> Result<(), Error> {
-            if (cv_id as usize) < CV_SIZE {
-                self.cvs[cv_id as usize] = value;
-                Ok(())
-            } else {
-                Err(Error::Io)
-            }
-        }
-
-        fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
-            let start_idx = start as usize;
-            if start_idx < CV_SIZE && start_idx + value.len() <= CV_SIZE {
-                self.cvs[start_idx..start_idx + value.len()].copy_from_slice(value);
-                Ok(())
-            } else {
-                Err(Error::Io)
-            }
-        }
-    }
+    use crate::testing::MockStore;
 
     #[test]
     fn test_addr_primary_address() {
@@ -309,16 +257,14 @@ mod tests {
 
     #[test]
     fn test_addr_extended_address_min() {
-        let store = MockStore::new()
-            .with_extended_address(128); // Minimum extended address
+        let store = MockStore::new().with_extended_address(128); // Minimum extended address
 
         assert_eq!(store.addr(), 128);
     }
 
     #[test]
     fn test_addr_extended_address_max() {
-        let store = MockStore::new()
-            .with_extended_address(16383); // Maximum extended address (0x3FFF)
+        let store = MockStore::new().with_extended_address(16383); // Maximum extended address (0x3FFF)
 
         assert_eq!(store.addr(), 16383);
     }

@@ -74,7 +74,7 @@ fn parse_add_sub_expr(s: &str) -> Option<u64> {
     let mut cur = String::new();
     let mut sign: i128 = 1;
 
-    let mut flush = |tok: &mut String, acc: &mut i128, sign: &mut i128| -> Option<()> {
+    let flush = |tok: &mut String, acc: &mut i128, sign: &mut i128| -> Option<()> {
         let t = tok.trim();
         if !t.is_empty() {
             let v = parse_size_literal(t)? as i128;

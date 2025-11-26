@@ -1,6 +1,6 @@
-use crate::speed::{CONTROLLER_HANDOVER};
+use crate::speed::CONTROLLER_HANDOVER;
 
-const BASE_PWM_ARR_LEN:usize = 16;
+const BASE_PWM_ARR_LEN: usize = 16;
 
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -14,7 +14,7 @@ pub struct Config {
     /// The PID feed forward factor.
     ///
     /// Used to scale the output when the motor started moving.
-    pub pid_ff:f32,
+    pub pid_ff: f32,
 }
 
 /// A controller that quickly ramps up the output to overcome the friction of the motor.
@@ -24,7 +24,7 @@ pub struct Controller {
     config: Config,
 
     /// A buffer that stores the output value at which the handover target was reached.
-    prev_start_output: [u16;BASE_PWM_ARR_LEN],
+    prev_start_output: [u16; BASE_PWM_ARR_LEN],
     buf_write_idx: usize,
 
     /// current output
@@ -32,25 +32,28 @@ pub struct Controller {
 }
 
 impl Controller {
-
     pub(crate) fn new(config: Config) -> Self {
         Self {
             config,
-            prev_start_output: [0;BASE_PWM_ARR_LEN],
+            prev_start_output: [0; BASE_PWM_ARR_LEN],
             buf_write_idx: 0,
             output: 0,
         }
     }
 
     /// Calculates the initial startup level by averaging the set base pwm values.
-    fn get_initial_level(&self)-> u16 {
-        let (sum, cnt) = self.prev_start_output.iter()
+    fn get_initial_level(&self) -> u16 {
+        let (sum, cnt) = self
+            .prev_start_output
+            .iter()
             .copied()
             .filter(|i| *i > 0)
-            .fold((0_usize, 0_usize), |(sum, cnt), v| (sum+v as usize, cnt+1));
+            .fold((0_usize, 0_usize), |(sum, cnt), v| {
+                (sum + v as usize, cnt + 1)
+            });
 
         if cnt != 0 {
-            ((sum / cnt) * 2/3) as u16
+            ((sum / cnt) * 2 / 3) as u16
         } else {
             0
         }
@@ -63,10 +66,7 @@ impl Controller {
         self.output = 0;
     }
 
-    pub fn compute(
-        &mut self,
-        measurement: f32,
-    ) -> ComputeResult {
+    pub fn compute(&mut self, measurement: f32) -> ComputeResult {
         if self.output == 0 {
             self.output = self.get_initial_level()
         }
@@ -76,7 +76,7 @@ impl Controller {
 
             // calculate the new output level for the next iteration
             self.output += self.config.output_max / 250;
-            if (self.output > self.config.output_max) {
+            if self.output > self.config.output_max {
                 // Try again with half value...
                 self.output = self.get_initial_level() / 2;
             }
@@ -85,7 +85,7 @@ impl Controller {
         } else {
             // we've reached the handover target, save the current output in the buffer for next time
             self.prev_start_output[self.buf_write_idx] = self.output;
-            self.buf_write_idx = (self.buf_write_idx+1)%self.prev_start_output.len();
+            self.buf_write_idx = (self.buf_write_idx + 1) % self.prev_start_output.len();
             self.output = 0;
 
             ComputeResult::Handover(self.config.pid_ff * self.output as f32)

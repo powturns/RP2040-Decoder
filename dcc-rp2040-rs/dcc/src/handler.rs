@@ -1,46 +1,62 @@
-use crate::cv::store::Store;
-use crate::{is_recipient, Timer};
-use crate::transport::{Packet, PacketError};
 use crate::cv::store::Error as StoreError;
+use crate::cv::store::Store;
 use crate::handler::Op::AcknowledgeCv;
+use crate::transport::packet::{
+    AdvancedOperationsInstruction, Error as PacketError, OperationModeInstruction, Packet,
+    ServiceInstructionType, ServicePacket,
+};
+use crate::{Timer, is_recipient};
+use motor::VelocitySetpoint;
 
 const SERVICE_MODE_TIMEOUT: usize = 20;
 
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
 pub enum Op {
+    /// Acknowledge the CV has been written using the service mode technique.
     AcknowledgeCv,
+
+    /// Resets the decoder to the startup state.
+    Reset,
+
+    /// A 128 speed step velocity setpoint.
+    Velocity128(VelocitySetpoint),
 }
 
 /// Contains the logic for handling packets.
 pub struct Handler<T, S>
-where T: Timer,
-      S: Store,{
-    timer:T,
+where
+    T: Timer,
+    S: Store,
+{
+    timer: T,
     store: S,
 }
 
-impl <T, S> Handler<T, S>
-where T: Timer, S: Store {
-    pub fn new(
-        timer: T,
-        store: S
-    ) -> Self {
-        Self {
-            timer,
-            store
-        }
+impl<T, S> Handler<T, S>
+where
+    T: Timer,
+    S: Store,
+{
+    pub fn new(timer: T, store: S) -> Self {
+        Self { timer, store }
     }
 
     /// Handles the packet, returning any operation that needs to be performed.
-    pub fn handle(&mut self, packet: Packet)-> Result<Option<Op>, Error> {
+    pub fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         if packet.is_reset() {
             // we may be entering service mode
             self.timer.start();
-            self.handle_reset(packet).map(|opt| Some(opt))
-        } else if let Some(elapsed) = self.timer.elapsed() && elapsed < SERVICE_MODE_TIMEOUT && packet.service_mode_candidate() {
+            self.handle_reset(packet).map(Some)
+        } else if let Some(elapsed) = self.timer.elapsed()
+            && elapsed < SERVICE_MODE_TIMEOUT
+            && packet.service_mode_candidate()
+        {
             self.timer.start();
 
             self.handle_service_mode(packet)
-        } else if is_recipient(&packet, &self.store) {
+        } else if is_recipient(packet, &self.store) {
             // this packet was specifically addressed to us (not a broadcast)
             self.timer.stop();
 
@@ -51,25 +67,27 @@ where T: Timer, S: Store {
         }
     }
 
-    fn handle_command(&mut self, packet: Packet) -> Result<Option<Op>, Error> {
-        todo!()
-    }
-
-    fn handle_service_mode(&mut self, packet: Packet) -> Result<Option<Op>, Error> {
-        match packet.instruction_type()? {
-            ServiceModeInstruction::ManipulateBit => {
-                self.manipulate_bit(packet)
-            }
-            ServiceModeInstruction::VerifyByte => {
-                self.verify_byte(packet)
-            }
-            ServiceModeInstruction::WriteByte => {
-                self.write_byte(packet)
-            }
+    fn handle_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        match OperationModeInstruction::try_from(packet)? {
+            OperationModeInstruction::AdvancedOperations(o) => match o {
+                AdvancedOperationsInstruction::SpeedStepControl(v) => Ok(Some(Op::Velocity128(v))),
+            },
         }
     }
 
-    fn verify_byte(&self, packet:Packet) -> Result<Option<Op>, Error> {
+    fn handle_service_mode(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        match packet.instruction_type()? {
+            ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet),
+            ServiceInstructionType::VerifyByte => self.verify_byte(packet),
+            ServiceInstructionType::WriteByte => self.write_byte(packet),
+        }
+    }
+
+    fn handle_reset(&mut self, packet: &Packet) -> Result<Op, Error> {
+        Ok(Op::Reset)
+    }
+
+    fn verify_byte(&self, packet: &Packet) -> Result<Option<Op>, Error> {
         let expected = packet.cv_data()?;
         let actual = self.store.read_byte(packet.cv_address()? as usize);
 
@@ -82,15 +100,16 @@ where T: Timer, S: Store {
         Ok(op)
     }
 
-    fn write_byte(&mut self, packet:Packet) -> Result<Option<Op>, Error> {
+    fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         // TODO: we dont allow writing every cv!, some are reserved for special operations!
 
-        self.store.write_byte(packet.cv_address()? as usize, packet.cv_data()?)?;
+        self.store
+            .write_byte(packet.cv_address()? as usize, packet.cv_data()?)?;
 
         Ok(Some(AcknowledgeCv))
     }
 
-    fn manipulate_bit(&mut self, packet:Packet) -> Result<Option<Op>, Error> {
+    fn manipulate_bit(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         // cv_data format: 111KDBBB
 
         let packed = packet.cv_data()?;
@@ -120,71 +139,12 @@ where T: Timer, S: Store {
         } else {
             // Bit Verify operation - direct XOR comparison
             let bit_matches = ((current >> bit_pos) & 1) == d_val;
-            Ok(if bit_matches { Some(AcknowledgeCv) } else { None })
+            Ok(if bit_matches {
+                Some(AcknowledgeCv)
+            } else {
+                None
+            })
         }
-    }
-
-    fn handle_reset(&mut self, packet: Packet) -> Result<Op, Error> {
-        // emergency stop the motor
-        // disable functions
-
-        todo!()
-    }
-}
-
-enum ServiceModeInstruction {
-    ManipulateBit,
-    VerifyByte,
-    WriteByte,
-}
-
-impl TryFrom<u8> for ServiceModeInstruction {
-    type Error = PacketError;
-
-    fn try_from(value: u8) -> Result<Self, Self::Error> {
-        match value {
-            0b10 => Ok(ServiceModeInstruction::ManipulateBit),
-            0b01 => Ok(ServiceModeInstruction::VerifyByte),
-            0b11 => Ok(ServiceModeInstruction::WriteByte),
-            _ => Err(PacketError::InvalidInstruction),
-        }
-    }
-}
-
-/// Packet extensions for when the decoder is in service mode.
-trait ServicePacket {
-    fn instruction_type(&self) -> Result<ServiceModeInstruction, PacketError>;
-
-    fn cv_address(&self) -> Result<u16, PacketError>;
-
-    fn cv_data(&self) -> Result<u8, PacketError>;
-}
-
-impl ServicePacket for Packet {
-    fn instruction_type(&self) -> Result<ServiceModeInstruction, PacketError> {
-        if self.data.is_empty() {
-            return Err(PacketError::Undersize)
-        }
-
-        (self.data[0] >> 3).try_into()
-    }
-
-    fn cv_address(&self) -> Result<u16, PacketError> {
-        if self.data.len() < 2 {
-            return Err(PacketError::Undersize);
-        }
-
-        let msb = ((self.data[0] & 0b0000011) as u16) << 8;
-
-        Ok(msb + self.data[1] as u16)
-    }
-
-    fn cv_data(&self) -> Result<u8, PacketError> {
-        if self.data.len() < 3 {
-            return Err(PacketError::Undersize);
-        }
-
-        Ok(self.data[2])
     }
 }
 
@@ -207,5 +167,383 @@ impl From<PacketError> for Error {
 impl From<StoreError> for Error {
     fn from(value: StoreError) -> Self {
         Self::Store(value)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cv::Cv::{DecoderConfiguration, ExtendedAddressMsb, PrimaryAddress};
+    use crate::handler::Op::Reset;
+    use crate::testing::{MockStore, MockTimer, pkt};
+    use heapless::Vec;
+    use motor::{Direction, SpeedStep};
+
+    fn reset_packet() -> Packet {
+        pkt(&[0x00, 0x00, 0x00])
+    }
+
+    fn service_verify_packet(cv_addr: u16, value: u8) -> Packet {
+        let addr_high = ((cv_addr >> 8) & 0x03) as u8;
+        let addr_low = (cv_addr & 0xFF) as u8;
+        pkt(&[0x70 | (0b01 << 3) | addr_high, addr_low, value, 0x00])
+    }
+
+    fn service_write_packet(cv_addr: u16, value: u8) -> Packet {
+        let addr_high = ((cv_addr >> 8) & 0x03) as u8;
+        let addr_low = (cv_addr & 0xFF) as u8;
+        pkt(&[0x70 | (0b11 << 3) | addr_high, addr_low, value, 0x00])
+    }
+
+    fn service_bit_verify_packet(cv_addr: u16, bit_pos: u8, bit_val: u8) -> Packet {
+        let addr_high = ((cv_addr >> 8) & 0x03) as u8;
+        let addr_low = (cv_addr & 0xFF) as u8;
+        let data = 0b1110_0000 | (bit_val << 3) | bit_pos;
+        pkt(&[0x70 | (0b10 << 3) | addr_high, addr_low, data, 0x00])
+    }
+
+    fn service_bit_write_packet(cv_addr: u16, bit_pos: u8, bit_val: u8) -> Packet {
+        let addr_high = ((cv_addr >> 8) & 0x03) as u8;
+        let addr_low = (cv_addr & 0xFF) as u8;
+        let data = 0b1111_0000 | (bit_val << 3) | bit_pos;
+        pkt(&[0x70 | (0b10 << 3) | addr_high, addr_low, data, 0x00])
+    }
+
+    fn operation_packet(addr: u16, instruction: &[u8]) -> Packet {
+        let mut vec = alloc::vec::Vec::new();
+        if addr <= 127 {
+            vec.push(addr as u8);
+        } else {
+            vec.push(0xC0 | ((addr >> 8) as u8)); // address high byte
+            vec.push((addr & 0xFF) as u8); // address low byte
+        }
+
+        vec.extend_from_slice(instruction);
+
+        pkt(&vec)
+    }
+
+    fn advanced_speed_step_packet(addr: u16, speed_step: SpeedStep) -> Packet {
+        let instruction = match speed_step {
+            SpeedStep::Stop => 0b00000000,
+            SpeedStep::EmergencyStop => 0b00000001,
+            SpeedStep::Num(n) => n + 1, // add one to account for emergency stop being 1
+        };
+        operation_packet(addr, &[0b00111111, instruction])
+    }
+
+    // Test harness to reduce boilerplate
+    struct TestHarness {
+        handler: Handler<MockTimer, MockStore>,
+    }
+
+    impl TestHarness {
+        fn new() -> Self {
+            Self {
+                handler: Handler::new(MockTimer::new(), MockStore::new()),
+            }
+        }
+
+        fn with_address(addr: u8) -> Self {
+            Self {
+                handler: Handler::new(
+                    MockTimer::new(),
+                    MockStore::new().with_cv(PrimaryAddress as u16, addr),
+                ),
+            }
+        }
+
+        fn with_extended_address(addr: u16) -> Self {
+            let cv_base = ExtendedAddressMsb as u16;
+
+            Self {
+                handler: Handler::new(
+                    MockTimer::new(),
+                    MockStore::new()
+                        .with_cv(
+                            // address high byte
+                            cv_base,
+                            (addr >> 8) as u8,
+                        )
+                        .with_cv(
+                            // address low byte
+                            cv_base + 1,
+                            addr as u8,
+                        )
+                        .with_cv(DecoderConfiguration as u16, 0b00100000), // put decoder into extended address mode
+                ),
+            }
+        }
+
+        fn with_store(store: MockStore) -> Self {
+            Self {
+                handler: Handler::new(MockTimer::new(), store),
+            }
+        }
+
+        fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+            self.handler.handle(packet)
+        }
+
+        fn set_timer_elapsed(&mut self, elapsed: usize) {
+            self.handler.timer.set_elapsed(elapsed);
+        }
+
+        fn start_timer(&mut self) {
+            self.handler.timer.start();
+        }
+
+        fn enter_service_mode(&mut self) {
+            self.start_timer();
+            self.set_timer_elapsed(10);
+        }
+
+        fn read_cv(&self, addr: usize) -> u8 {
+            self.handler.store.read_byte(addr)
+        }
+    }
+
+    #[test]
+    fn test_reset_packet_starts_timer() {
+        let mut harness = TestHarness::new();
+        let result = harness.handle(&reset_packet());
+
+        assert_eq!(result, Ok(Some(Reset)));
+        assert!(harness.handler.timer.running);
+    }
+
+    #[test]
+    fn test_service_verify_byte_match() {
+        let store = MockStore::new().with_cv(10, 0x42);
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let packet = service_verify_packet(10, 0x42);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+    }
+
+    #[test]
+    fn test_service_verify_byte_mismatch() {
+        let store = MockStore::new().with_cv(10, 0x42);
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let packet = service_verify_packet(10, 0x99);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+    }
+
+    #[test]
+    fn test_service_write_byte() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let packet = service_write_packet(20, 0xAB);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(20), 0xAB);
+    }
+
+    #[test]
+    fn test_service_bit_verify_match() {
+        let store = MockStore::new().with_cv(
+            15,
+            0b0000_1000, // bit 3 is set
+        );
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let packet = service_bit_verify_packet(15, 3, 1);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+    }
+
+    #[test]
+    fn test_service_bit_verify_mismatch() {
+        let store = MockStore::new().with_cv(
+            15,
+            0b0000_1000, // bit 3 is set
+        );
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let packet = service_bit_verify_packet(15, 3, 0);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn test_service_bit_write_set() {
+        let store = MockStore::new().with_cv(
+            25,
+            0b0000_0000, // bit 3 is set
+        );
+        let mut harness = TestHarness::with_store(store);
+
+        harness.start_timer();
+        harness.set_timer_elapsed(10);
+
+        let packet = service_bit_write_packet(25, 5, 1); // set bit 5
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(25), 0b0010_0000);
+    }
+
+    #[test]
+    fn test_service_bit_write_clear() {
+        let store = MockStore::new().with_cv(25, 0xFF);
+        let mut harness = TestHarness::with_store(store);
+
+        harness.start_timer();
+        harness.set_timer_elapsed(10);
+
+        let packet = service_bit_write_packet(25, 2, 0); // clear bit 2
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(25), 0b1111_1011);
+    }
+
+    #[test]
+    fn test_service_mode_timeout() {
+        let mut harness = TestHarness::new();
+
+        harness.start_timer();
+        harness.set_timer_elapsed(SERVICE_MODE_TIMEOUT + 1); // past timeout
+
+        let packet = service_verify_packet(10, 0x42);
+        let result = harness.handle(&packet);
+
+        // Should not be handled as service mode packet
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn test_operation_mode_basic_address() {
+        let mut harness = TestHarness::with_address(3);
+
+        let packet = advanced_speed_step_packet(3, SpeedStep::Num(50));
+        let result = harness.handle(&packet);
+
+        assert_eq!(
+            result,
+            Ok(Some(Op::Velocity128(VelocitySetpoint {
+                speed_step: SpeedStep::Num(50),
+                direction: Direction::Reverse,
+            })))
+        );
+    }
+
+    #[test]
+    fn test_operation_mode_extended_address() {
+        let mut harness = TestHarness::with_extended_address(5000);
+
+        let packet = advanced_speed_step_packet(5000, SpeedStep::Num(100));
+        let result = harness.handle(&packet);
+
+        assert_eq!(
+            result,
+            Ok(Some(Op::Velocity128(VelocitySetpoint {
+                speed_step: SpeedStep::Num(100),
+                direction: Direction::Reverse,
+            })))
+        );
+    }
+
+    #[test]
+    fn test_operation_mode_stop() {
+        let mut harness = TestHarness::with_address(10);
+
+        let packet = advanced_speed_step_packet(10, SpeedStep::Stop);
+        let result = harness.handle(&packet);
+
+        assert_eq!(
+            result,
+            Ok(Some(Op::Velocity128(VelocitySetpoint {
+                speed_step: SpeedStep::Stop,
+                direction: Direction::Reverse,
+            })))
+        );
+    }
+
+    #[test]
+    fn test_operation_mode_emergency_stop() {
+        let mut harness = TestHarness::with_address(10);
+
+        let packet = advanced_speed_step_packet(10, SpeedStep::EmergencyStop);
+        let result = harness.handle(&packet);
+
+        assert_eq!(
+            result,
+            Ok(Some(Op::Velocity128(VelocitySetpoint {
+                speed_step: SpeedStep::EmergencyStop,
+                direction: Direction::Reverse,
+            })))
+        );
+    }
+
+    #[test]
+    fn test_packet_not_for_us() {
+        let mut harness = TestHarness::with_address(3);
+
+        // Send packet addressed to different decoder
+        let packet = advanced_speed_step_packet(99, SpeedStep::Num(50));
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(None));
+    }
+
+    #[test]
+    fn test_service_mode_sequence() {
+        let mut harness = TestHarness::with_address(3);
+
+        // Start with reset
+        let result = harness.handle(&reset_packet());
+        assert_eq!(result, Ok(Some(Op::Reset)));
+
+        // Timer should be running, set elapsed time
+        harness.set_timer_elapsed(5);
+
+        // Write CV
+        let result = harness.handle(&service_write_packet(100, 0x55));
+        assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
+        assert_eq!(harness.read_cv(100), 0x55);
+
+        // Verify CV
+        let result = harness.handle(&service_verify_packet(100, 0x55));
+        assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
+    }
+
+    #[test]
+    fn test_bit_manipulation_all_positions() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        // Test writing each bit position
+        for bit_pos in 0..8 {
+            let packet = service_bit_write_packet(50, bit_pos, 1);
+            let result = harness.handle(&packet);
+            assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
+        }
+
+        // All bits should be set
+        assert_eq!(harness.read_cv(50), 0xFF);
+
+        // Clear each bit
+        for bit_pos in 0..8 {
+            let packet = service_bit_write_packet(50, bit_pos, 0);
+            let result = harness.handle(&packet);
+            assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
+        }
+
+        // All bits should be clear
+        assert_eq!(harness.read_cv(50), 0x00);
     }
 }

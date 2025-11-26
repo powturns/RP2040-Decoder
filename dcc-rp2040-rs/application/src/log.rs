@@ -185,8 +185,8 @@ macro_rules! unwrap {
     ($arg:expr) => {
         match $crate::log::Try::into_result($arg) {
             ::core::result::Result::Ok(t) => t,
-            ::core::result::Result::Err(e) => {
-                ::core::panic!("unwrap of `{}` failed: {:?}", ::core::stringify!($arg), e);
+            ::core::result::Result::Err(_) => {
+                ::core::panic!("unwrap of `{}` failed", ::core::stringify!($arg));
             }
         }
     };

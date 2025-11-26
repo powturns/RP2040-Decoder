@@ -1,5 +1,5 @@
+use crate::transport::{Packet, PacketError, is_mf_extended_address};
 use heapless::Vec;
-use crate::transport::{is_mf_extended_address, Packet, PacketError};
 
 pub(crate) struct DccCodec {}
 

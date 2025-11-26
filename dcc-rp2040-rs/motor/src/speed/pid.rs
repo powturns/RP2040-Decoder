@@ -13,10 +13,9 @@ use core::time::Duration;
 
 use discrete_pid::pid::{PidConfig, PidConfigError, PidController};
 use discrete_pid::time::Millis;
-use discrete_pid::{pid, time};
 
 #[derive(Eq, PartialEq)]
-#[cfg_attr(test, derive(core::fmt::Debug))]
+#[cfg_attr(test, derive(Debug))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     ConfigError(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] PidConfigError),
@@ -217,11 +216,6 @@ impl Controller {
             Some(feedforward),
         ) as u16)
     }
-
-    /// Returns the most recent output value from the underlying PID controller.
-    pub fn last_output(&self) -> f32 {
-        self.pid.output()
-    }
 }
 
 #[cfg(test)]
@@ -232,8 +226,8 @@ mod tests {
     fn default_cv_config() -> Config {
         let max_setpoint = 1600.0; //CV_5  -    V_max               -   Default = 100*16
         Config {
-            sample_time: Duration::from_millis(5),                                    //CV_49 = 5   -> Ts = 5 ms
-            filter_tc: Duration::from_millis(10), // CV_48 = 10 -> tau = 10 ms -> 0.010 s
+            sample_time: Duration::from_millis(5), //CV_49 = 5   -> Ts = 5 ms
+            filter_tc: Duration::from_millis(10),  // CV_48 = 10 -> tau = 10 ms -> 0.010 s
             ki: 2.5, //CV_50  -   PID Control I_Factor        =   CV_50/10        Default = 25 -> 2.5
             kd: 0.005, //CV_51  -   PID Control D_Factor        =   CV_51/10000     Default = 50 -> 0.005
             output_max: (125000000.0 / (150 * 100 + 10000) as f32) as u16, // CV_9  -    PWM frequency in Hz = CV_9*100+10000    - Default = (150*100+10000)Hz = 25kHz
@@ -291,10 +285,7 @@ mod tests {
         let out = pid.compute(measurement, setpoint, 0, ff).unwrap();
 
         assert!(out >= 0, "output should be >= 0");
-        assert!(
-            out <= cfg.output_max,
-            "output should be <= output_max"
-        );
+        assert!(out <= cfg.output_max, "output should be <= output_max");
     }
     //endregion
 

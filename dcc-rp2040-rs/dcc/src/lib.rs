@@ -1,13 +1,16 @@
 #![no_std]
 
 use crate::cv::store::{Store, StoreExt};
-use crate::transport::{Packet, PacketError};
+use crate::transport::packet::Packet;
 
+pub mod cv;
 mod device;
+pub mod handler;
 mod log;
 pub mod transport;
-pub mod cv;
-pub mod handler;
+
+#[cfg(test)]
+mod testing;
 
 const BROADCAST_ADDRESS: u16 = 0xFFFF;
 
@@ -25,7 +28,6 @@ fn read_extended_address(data: &[u8]) -> u16 {
 pub fn is_recipient(packet: &Packet, store: &impl Store) -> bool {
     packet.addr().map(|a| a == store.addr()).unwrap_or(false)
 }
-
 
 pub trait Timer {
     /// Clears any running timers.

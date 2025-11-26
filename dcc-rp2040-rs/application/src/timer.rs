@@ -1,15 +1,13 @@
-use embassy_time::Instant;
 use dcc::Timer;
+use embassy_time::Instant;
 
 pub(crate) struct InstantTimer {
-    mark: Option<Instant>
+    mark: Option<Instant>,
 }
 
 impl InstantTimer {
     pub(crate) fn new() -> Self {
-        Self {
-            mark: None
-        }
+        Self { mark: None }
     }
 }
 

@@ -1,79 +1,8 @@
+use crate::transport::packet::{Error as PacketError, Packet};
 use codec::DccCodec;
-use heapless::Vec;
-use crate::read_extended_address;
 
 pub mod codec;
-
-#[derive(Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(test, derive(Debug))]
-
-pub enum PacketError {
-    /// Packet is too short
-    Undersize,
-
-    /// Packet is too long
-    Oversize,
-
-    /// Packet has an invalid checksum
-    InvalidChecksum,
-
-    /// Packet has an invalid / unsupported address
-    InvalidAddress,
-
-    /// Packet contains an invalid instruction.
-    ///
-    /// May be for operation or service mode.
-    InvalidInstruction,
-}
-
-/// A valid DCC packet.
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-pub struct Packet {
-    pub(crate) data: Vec<u8, 6>,
-}
-
-impl Packet {
-    /// Reads the address from the packet
-    pub fn addr(&self) -> Result<u16, PacketError> {
-        if is_basic_address(self.data.as_slice()) {
-            return Ok((self.data[0] & 0b01111111) as u16);
-        }
-
-        if is_mf_extended_address(self.data.as_slice()) {
-            return Ok(read_extended_address(&self.data[0..2]));
-        }
-
-        if (128..=191).contains(&self.data[0]) {
-            // todo: accessory decoders
-        }
-
-        Err(PacketError::InvalidAddress)
-    }
-
-    /// Returns `true` if the packet may be a service mode packet.
-    ///
-    /// We cannot know for sure it is a service mode packet because some
-    /// command mode packets have the same structure.
-    pub fn service_mode_candidate(&self) -> bool {
-        (112..=127u8).contains(&self.data[0])
-    }
-
-    // pub fn raw_addr(&self) -> Result<&[u8], PacketError> {
-    //     if is_basic_address(self.data.as_slice()) {
-    //         Ok(&self.data[..1])
-    //     } else if is_mf_extended_address(self.data.as_slice()) {
-    //         Ok(&self.data[..2])
-    //     } else {
-    //         Err(PacketError::InvalidAddress)
-    //     }
-    // }
-
-    /// Returns `true` if the packet is a reset packet.
-    pub fn is_reset(&self) -> bool {
-        self.data.len() >= 2 && self.data[0] == 0x00 && self.data[1] == 0x00
-    }
-}
+pub mod packet;
 
 pub struct Decoder<D: RawDccDecoder> {
     inner: D,

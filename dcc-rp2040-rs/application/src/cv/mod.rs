@@ -2,7 +2,7 @@ use core::mem::MaybeUninit;
 use core::ops::{Deref, DerefMut};
 use dcc::cv::CV_SIZE;
 use dcc::cv::store::{Error, Store};
-use embassy_rp::flash::{Async, Error as FlashError, Flash, Instance, Mode};
+use embassy_rp::flash::{Async, Flash, Instance};
 
 pub struct FlashStore<'d, T: Instance, const FLASH_SIZE: usize> {
     /// The offset of the cv data in flash, relative to the start of the flash.

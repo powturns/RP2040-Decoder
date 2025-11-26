@@ -11,10 +11,10 @@ opt-level = 'z'
 overflow-checks = true
 
 [profile.release]
-codegen-units = 1
-debug = 2 # needed for probe-rs log locations
-debug-assertions = false
-incremental = false
-lto = 'fat'
+lto = true
 opt-level = 'z'
+incremental = false
+codegen-units = 1
+debug = true # needed for probe-rs log locations
+debug-assertions = false
 overflow-checks = false

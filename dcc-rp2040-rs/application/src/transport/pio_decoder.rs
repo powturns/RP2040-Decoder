@@ -84,6 +84,7 @@ impl<'d, T: Instance, C: Channel, const SM: usize> PioDccDecoder<'d, T, C, SM> {
 
 impl<'d, T: Instance, C: Channel, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, C, SM> {
     async fn read<'a>(&mut self, buff: &'a mut [u8]) -> &'a [u8] {
+        assert!(buff.len() >= 8);
         let rx = self.sm.rx();
 
         let din: &mut [u32] = bytemuck::cast_slice_mut(buff);

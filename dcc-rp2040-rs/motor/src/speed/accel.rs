@@ -1,84 +1,46 @@
-use crate::Direction;
-use crate::Direction::Forward;
+use crate::{SpeedStep, VelocitySetpoint};
 use core::time::Duration;
 
-#[derive(Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(test, derive(core::fmt::Debug))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-enum SpeedStep {
-    Stop,
-    EmergencyStop,
-    Num(u8),
-}
-
-impl SpeedStep {
-    fn idx(&self) -> u8 {
-        match self {
-            SpeedStep::Stop | SpeedStep::EmergencyStop => 0,
-            SpeedStep::Num(n) => *n,
-        }
-    }
-}
-
-#[derive(Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(test, derive(core::fmt::Debug))]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-struct SpeedTarget {
-    speed_step: SpeedStep,
-    direction: Direction,
-}
-
-impl Default for SpeedTarget {
-    fn default() -> Self {
-        Self {
-            speed_step: SpeedStep::Stop,
-            direction: Forward,
-        }
-    }
-}
-
-impl SpeedTarget {
-    /// Checks if the current and other instance's index and direction are equivalent.
-    fn equivalent(&self, other: &SpeedTarget) -> bool {
-        self.speed_step.idx() == other.speed_step.idx() && self.direction == other.direction
-    }
-}
-
-struct Config {
+pub struct Config {
     // CV3
-    accel_rate: u8,
+    pub accel_rate: u8,
     // CV4
-    decel_rate: u8,
+    pub decel_rate: u8,
 
     // CV175
-    loop_delay: Duration, // FIXME: default to 7ms
+    pub loop_delay: Duration, // FIXME: default to 7ms
 }
 
-struct Helper {
+pub struct Helper {
     config: Config,
-    target: SpeedTarget,
-    current: SpeedTarget,
+    target: VelocitySetpoint,
+    current: VelocitySetpoint,
 }
 
 impl Helper {
-    fn new(config: Config) -> Self {
+    pub fn new(config: Config) -> Self {
         Self {
             config,
-            target: SpeedTarget::default(),
-            current: SpeedTarget::default(),
+            target: VelocitySetpoint::default(),
+            current: VelocitySetpoint::default(),
         }
     }
 
     /// sets the new control target. Call [step] after this calling this as the previously
     /// returned delay may no longer be valid.
-    fn set_target(&mut self, target: SpeedTarget) {
+    pub fn set_target(&mut self, target: VelocitySetpoint) {
         self.target = target;
     }
 
-    /// Calculates the new [SpeedTarget] after a single step.
+    pub fn reset(&mut self) {
+        self.current = VelocitySetpoint::default();
+        self.target = VelocitySetpoint::default();
+    }
+
+    /// Calculates the new [VelocitySetpoint] after a single step.
     ///
     /// Returns the new target, and the delay before calling step again.
-    fn step(&mut self) -> (SpeedTarget, Duration) {
+    pub fn step(&mut self) -> (VelocitySetpoint, Duration) {
         if self.current.equivalent(&self.target) {
             return (self.target, Duration::MAX);
         }
@@ -141,13 +103,14 @@ impl Helper {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     #[cfg(test)]
     extern crate std;
-    extern crate alloc;
 
+    use super::*;
+    use crate::SpeedStep;
     use alloc::vec;
     use alloc::vec::Vec;
-    use super::*;
 
     fn default_config() -> Config {
         Config {
@@ -175,7 +138,7 @@ mod tests {
 
     #[test]
     fn test_speed_target_default() {
-        let target = SpeedTarget::default();
+        let target = VelocitySetpoint::default();
         assert_eq!(target.speed_step, SpeedStep::Stop);
         assert_eq!(target.direction, Direction::Forward);
     }
@@ -184,14 +147,14 @@ mod tests {
     fn test_new_speed_control() {
         let config = default_config();
         let control = Helper::new(config);
-        assert_eq!(control.current, SpeedTarget::default());
-        assert_eq!(control.target, SpeedTarget::default());
+        assert_eq!(control.current, VelocitySetpoint::default());
+        assert_eq!(control.target, VelocitySetpoint::default());
     }
 
     #[test]
     fn test_set_target() {
         let mut control = Helper::new(default_config());
-        let new_target = SpeedTarget {
+        let new_target = VelocitySetpoint {
             speed_step: SpeedStep::Num(50),
             direction: Direction::Forward,
         };
@@ -203,14 +166,14 @@ mod tests {
     fn test_step_when_at_target_returns_max_delay() {
         let mut control = Helper::new(default_config());
         let (current, delay) = control.step();
-        assert_eq!(current, SpeedTarget::default());
+        assert_eq!(current, VelocitySetpoint::default());
         assert_eq!(delay, Duration::MAX);
     }
 
     #[test]
     fn test_acceleration_with_rate() {
         let mut control = Helper::new(default_config());
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(10),
             direction: Direction::Forward,
         });
@@ -225,7 +188,7 @@ mod tests {
     #[test]
     fn test_acceleration_steps_gradually() {
         let mut control = Helper::new(default_config());
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(5),
             direction: Forward,
         });
@@ -245,7 +208,7 @@ mod tests {
     #[test]
     fn test_acceleration_without_rate_jumps_immediately() {
         let mut control = Helper::new(config_no_ramp());
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(50),
             direction: Direction::Forward,
         });
@@ -259,14 +222,14 @@ mod tests {
         let mut control = Helper::new(default_config());
 
         // Start at control 10
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(10),
             direction: Direction::Forward,
         };
         control.target = control.current;
 
         // Set target to lower control
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(5),
             direction: Direction::Forward,
         });
@@ -281,14 +244,14 @@ mod tests {
         let mut control = Helper::new(default_config());
 
         // Start at control 5
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(5),
             direction: Forward,
         };
         control.target = control.current;
 
         // Decelerate to stop
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Stop,
             direction: Forward,
         });
@@ -309,13 +272,13 @@ mod tests {
     fn test_deceleration_without_rate_jumps_immediately() {
         let mut control = Helper::new(config_no_ramp());
 
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(50),
             direction: Direction::Forward,
         };
         control.target = control.current;
 
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Stop,
             direction: Direction::Forward,
         });
@@ -328,13 +291,13 @@ mod tests {
     fn test_emergency_stop_immediate() {
         let mut control = Helper::new(default_config());
 
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(50),
             direction: Direction::Forward,
         };
         control.target = control.current;
 
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::EmergencyStop,
             direction: Direction::Forward,
         });
@@ -348,14 +311,14 @@ mod tests {
         let mut control = Helper::new(default_config());
 
         // Start moving forward at control 3
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(3),
             direction: Forward,
         };
         control.target = control.current;
 
         // Request reverse direction
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(3),
             direction: Direction::Reverse,
         });
@@ -383,13 +346,13 @@ mod tests {
     fn test_direction_change_without_decel_rate_switches_immediately() {
         let mut control = Helper::new(config_no_ramp());
 
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(50),
             direction: Forward,
         };
         control.target = control.current;
 
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(30),
             direction: Direction::Reverse,
         });
@@ -403,13 +366,13 @@ mod tests {
     fn test_direction_change_from_stop() {
         let mut control = Helper::new(default_config());
 
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Stop,
             direction: Direction::Forward,
         };
         control.target = control.current;
 
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(5),
             direction: Direction::Reverse,
         });
@@ -435,7 +398,7 @@ mod tests {
             loop_delay: Duration::from_millis(10),
         });
 
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Num(3),
             direction: Direction::Forward,
         });
@@ -461,13 +424,13 @@ mod tests {
             loop_delay: Duration::from_millis(10),
         });
 
-        control.current = SpeedTarget {
+        control.current = VelocitySetpoint {
             speed_step: SpeedStep::Num(3),
             direction: Direction::Forward,
         };
         control.target = control.current;
 
-        control.set_target(SpeedTarget {
+        control.set_target(VelocitySetpoint {
             speed_step: SpeedStep::Stop,
             direction: Direction::Forward,
         });

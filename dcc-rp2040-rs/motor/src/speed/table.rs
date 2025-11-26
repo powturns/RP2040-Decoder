@@ -1,4 +1,5 @@
 const SPEED_TABLE_LEN: usize = 127;
+pub type SpeedTable = [u16; SPEED_TABLE_LEN];
 
 pub struct Config {
     /// Used to define the voltage drive level used as the start voltage on the motor.
@@ -12,7 +13,7 @@ pub struct Config {
 }
 
 /// Builds a speed table from the specified configuration.
-pub fn build(config: Config) -> [u16; SPEED_TABLE_LEN] {
+pub fn build(config: Config) -> SpeedTable {
     // This method uses floating point operations. The intention is it isn't
     // called often. If this changes, we should implement integer approximations.
 
