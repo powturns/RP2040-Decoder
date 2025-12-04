@@ -23,7 +23,9 @@ impl<D: RawDccDecoder> Decoder<D> {
             match DccCodec::decode(data) {
                 Ok(p) => match p {
                     None => {
-                        trace!("idle packet")
+                        if cfg!(feature = "verbose-transport") {
+                            trace!("idle packet")
+                        }
                     }
                     Some(p) => return p,
                 },

@@ -62,6 +62,12 @@ probe-rs = [
     "dep:panic-probe"
 ]
 
+verbose-transport = [
+    "dcc/verbose-transport"
+]
+
+verbose-motor = []
+
 skip-include = []
 [build-dependencies]
 regex = "1.11.2"

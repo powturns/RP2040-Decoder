@@ -32,6 +32,7 @@ impl Config {
     }
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 enum Mode {
     Startup,
 
@@ -77,6 +78,10 @@ impl Controller {
         }
 
         let measurement = measurement - self.config.adc_offset;
+
+        if cfg!(feature = "verbose") {
+            trace!("compute(mode={} measurement={} setpoint={})", self.mode, measurement, setpoint);
+        }
 
         match self.mode {
             Startup => match self.startup.compute(measurement) {

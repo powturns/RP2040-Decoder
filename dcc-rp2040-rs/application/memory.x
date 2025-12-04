@@ -1,7 +1,7 @@
 MEMORY {
     BOOT2 : ORIGIN = 0x10000000, LENGTH = 0x100
     FLASH : ORIGIN = 0x10000100, LENGTH = 2048K - 0x100 - 128K
-    APP_FLASH : ORIGIN = 0x10000000 + 2048K - 128K, LENGTH = 128K
+    CV_FLASH : ORIGIN = 0x10000000 + 2048K - 128K, LENGTH = 128K
 
     /* Pick one of the two options for RAM layout     */
 
@@ -16,7 +16,3 @@ MEMORY {
     /* SCRATCH_A: ORIGIN = 0x20040000, LENGTH = 4K    */
     /* SCRATCH_B: ORIGIN = 0x20041000, LENGTH = 4K    */
 }
-
-/* Export symbols for the reserved flash region */
-PROVIDE(app_flash_start = ORIGIN(APP_FLASH));
-PROVIDE(app_flash_end   = ORIGIN(APP_FLASH) + LENGTH(APP_FLASH));

@@ -18,6 +18,8 @@ motor = { path = "../motor", features = ["debug"] }
 default = [
 ]
 
+verbose-transport = []
+
 defmt = [
     "dep:defmt",
     "heapless/defmt",

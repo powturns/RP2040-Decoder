@@ -1,6 +1,7 @@
 use crate::cv::Cv::*;
 use crate::read_extended_address;
 use core::time::Duration;
+use crate::cv::DEFAULT_VALUES;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -39,7 +40,8 @@ pub trait Store {
     /// writes a single configuration variable.
     fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error>;
 
-    fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error>;
+    /// Writes a multi-byte configuration value to the specified address.
+    fn write_bytes(&mut self, address: usize, value: &[u8]) -> Result<(), Error>;
 }
 
 pub trait CvValue {
@@ -111,6 +113,9 @@ pub trait StoreExt {
 
     /// Feed forward factor for the PID controller.
     fn pid_k_ff(&self) -> f32;
+
+    /// Delay between cutting power to the motor and measuring the EMF signal.
+    fn emf_measurement_delay(&self) -> Duration;
 
     fn emf_l_side_cutoff(&self) -> u8;
     fn emf_r_side_cutoff(&self) -> u8;
@@ -195,6 +200,10 @@ impl<T: Store> StoreExt for T {
         self.read_byte(PidFf as usize) as f32 / 255.0
     }
 
+    fn emf_measurement_delay(&self) -> Duration {
+        Duration::from_micros(self.read_byte(EmfMsrDelay as usize) as u64)
+    }
+
     fn emf_l_side_cutoff(&self) -> u8 {
         self.read_byte(EmfMsrLowCutoff as usize)
     }
@@ -227,6 +236,23 @@ impl<T: Store> StoreExt for T {
     fn speed_step_period(&self) -> Duration {
         Duration::from_millis(self.read_byte(SpeedStepPeriod as usize) as u64)
     }
+}
+
+pub fn ensure_populated(store: &mut impl Store) -> Result<(), Error> {
+    let primary_addr = store.addr();
+    debug!("primary_addr = {}", primary_addr);
+
+    if primary_addr == 0 {
+        warn!("CV store is empty. Resetting to default values.");
+        reset(store)?;
+    }
+
+    Ok(())
+}
+
+/// Resets the CV store to the default values.
+pub fn reset(store: &mut impl Store) -> Result<(), Error> {
+    store.write_bytes(1, DEFAULT_VALUES.as_slice())
 }
 
 #[cfg(test)]

@@ -3,10 +3,11 @@
 use crate::cv::store::{Store, StoreExt};
 use crate::transport::packet::Packet;
 
+pub(crate) mod log;
+
 pub mod cv;
 mod device;
 pub mod handler;
-mod log;
 pub mod transport;
 
 #[cfg(test)]

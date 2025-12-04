@@ -7,7 +7,7 @@ use embassy_rp::adc::{Adc, Async, Channel};
 use embassy_rp::pwm;
 use embassy_rp::pwm::{Pwm, PwmError, PwmOutput};
 use embassy_rp::{Peri, dma};
-use embassy_time::Timer;
+use embassy_time::{Duration, Timer};
 use embedded_hal::pwm::SetDutyCycle;
 use math::filtered_mean;
 
@@ -30,9 +30,11 @@ impl From<pwm::PwmError> for Error {
 pub struct Config {
     pub pwm_max_output: u16,
     pub pwm_clk_divider: fixed::FixedU16<fixed::types::extra::U4>,
+    pub emf_measurement_delay: Duration,
 }
 
 pub struct RpMotorController<DMA: dma::Channel> {
+    config: Config,
     dir: Direction,
     fwd: DirectionControl,
     rev: DirectionControl,
@@ -73,6 +75,7 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
         );
 
         Self {
+            config,
             dir: Direction::Forward,
             fwd,
             rev,
@@ -91,6 +94,8 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
         const SAMPLE_CNT: usize = 100; //CV_ARRAY_FLASH[60]
 
         let buf = &mut [0; SAMPLE_CNT];
+
+        Timer::after(self.config.emf_measurement_delay).await;
 
         match self.dir {
             Direction::Forward => {
@@ -133,22 +138,22 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         self.stop()?;
 
         Timer::after_secs(1).await;
-        info!("Measuring ADC offset in reverse direction. n={}", buf.len());
+        debug!("Measuring ADC offset in reverse direction. n={}", buf.len());
         let _ = &mut self
             .fwd
             .measure_emf(&mut self.adc, buf, self.dma.reborrow())
             .await?;
         let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
-        info!("offset_avg_fwd={}", offset_avg_fwd);
+        debug!("offset_avg_fwd={}", offset_avg_fwd);
 
         Timer::after_secs(1).await;
-        info!("Measuring ADC offset in forward direction. n={}", buf.len());
+        debug!("Measuring ADC offset in forward direction. n={}", buf.len());
         let _ = &mut self
             .rev
             .measure_emf(&mut self.adc, buf, self.dma.reborrow())
             .await?;
         let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
-        info!("offset_avg_rev={}", offset_avg_rev);
+        debug!("offset_avg_rev={}", offset_avg_rev);
 
         Ok(((offset_avg_fwd as u32 + offset_avg_rev as u32) / 2) as u16)
     }
@@ -173,17 +178,17 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         Ok(())
     }
 
-    fn set_output_level(&mut self, level: u16, direction: Direction) -> Result<(), Error> {
+    fn set_output_level(&mut self, pwm_level: u16, direction: Direction) -> Result<(), Error> {
         self.dir = direction;
 
         match direction {
             Direction::Forward => {
                 self.rev.stop()?;
-                self.fwd.set_output(level)?;
+                self.fwd.set_output(pwm_level)?;
             }
             Direction::Reverse => {
                 self.fwd.stop()?;
-                self.rev.set_output(level)?;
+                self.rev.set_output(pwm_level)?;
             }
         }
 

@@ -1,6 +1,6 @@
 use crate::speed::CONTROLLER_HANDOVER;
 
-const BASE_PWM_ARR_LEN: usize = 16;
+const START_OUTPUT_ARR_LEN: usize = 16;
 
 #[derive(Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -24,7 +24,7 @@ pub struct Controller {
     config: Config,
 
     /// A buffer that stores the output value at which the handover target was reached.
-    prev_start_output: [u16; BASE_PWM_ARR_LEN],
+    prev_start_output: [u16; START_OUTPUT_ARR_LEN],
     buf_write_idx: usize,
 
     /// current output
@@ -35,7 +35,7 @@ impl Controller {
     pub(crate) fn new(config: Config) -> Self {
         Self {
             config,
-            prev_start_output: [0; BASE_PWM_ARR_LEN],
+            prev_start_output: [0; START_OUTPUT_ARR_LEN],
             buf_write_idx: 0,
             output: 0,
         }
@@ -84,11 +84,14 @@ impl Controller {
             ComputeResult::Output(curr_output)
         } else {
             // we've reached the handover target, save the current output in the buffer for next time
+            debug!("reached PID handover level: measurement={} output={}", measurement, self.output);
+            let ff = self.config.pid_ff * self.output as f32;
+
             self.prev_start_output[self.buf_write_idx] = self.output;
             self.buf_write_idx = (self.buf_write_idx + 1) % self.prev_start_output.len();
             self.output = 0;
 
-            ComputeResult::Handover(self.config.pid_ff * self.output as f32)
+            ComputeResult::Handover(ff)
         }
     }
 }

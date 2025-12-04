@@ -96,7 +96,9 @@ impl<'d, T: Instance, C: Channel, const SM: usize> RawDccDecoder for PioDccDecod
             *byte = !*byte;
         }
 
-        trace!("{:03} ({:08b})", buff, buff,);
+        if cfg!(feature = "verbose-transport") {
+            trace!("{:03} ({:08b})", buff, buff,);
+        }
 
         buff
     }

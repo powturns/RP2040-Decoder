@@ -1,6 +1,9 @@
 const SPEED_TABLE_LEN: usize = 127;
 pub type SpeedTable = [u16; SPEED_TABLE_LEN];
 
+#[derive(Eq, PartialEq)]
+#[cfg_attr(test, derive(Debug))]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// Used to define the voltage drive level used as the start voltage on the motor.
     pub v_start: u8,

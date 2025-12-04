@@ -1,26 +1,30 @@
 use core::mem::MaybeUninit;
-use core::ops::{Deref, DerefMut};
+use core::ops::{Deref, DerefMut, Range};
 use dcc::cv::CV_SIZE;
 use dcc::cv::store::{Error, Store};
-use embassy_rp::flash::{Async, Flash, Instance};
+use embassy_rp::flash::{Async, Flash as RpFlash, Instance};
 
-pub struct FlashStore<'d, T: Instance, const FLASH_SIZE: usize> {
-    /// The offset of the cv data in flash, relative to the start of the flash.
-    cv_data_offset: u32,
-    flash: Flash<'d, T, Async, FLASH_SIZE>,
+/// A [Store] implementation that persists CVs to flash on the RP device.
+pub struct Flash<'d, T: Instance, const FLASH_SIZE: usize> {
+    /// The range of flash addresses used by cv data, relative to the start of the flash.
+    cv_data_range: Range<u32>,
+    flash: RpFlash<'d, T, Async, FLASH_SIZE>,
     cache: AlignedCvArray,
 }
 
-impl<'d, T: Instance, const FLASH_SIZE: usize> FlashStore<'d, T, FLASH_SIZE> {
+impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, FLASH_SIZE> {
+    /// Create a new store that uses flash for persistence.
+    ///
+    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
     pub async fn new(
-        mut flash: Flash<'d, T, Async, FLASH_SIZE>,
+        mut flash: RpFlash<'d, T, Async, FLASH_SIZE>,
         offset: u32,
     ) -> Result<Self, Error> {
         let cache = Self::read_cv_array(&mut flash, offset).await?;
 
         Ok(Self {
             flash,
-            cv_data_offset: offset,
+            cv_data_range: offset..offset + (cache.len().max(embassy_rp::flash::ERASE_SIZE) as u32),
             cache,
         })
     }
@@ -31,18 +35,18 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> FlashStore<'d, T, FLASH_SIZE> {
         // If we start storing additional items in flash (in the cv sector), we may need to read the entire sector (ERASE_SIZE) into memory, update the
         // cv values.
 
-        self.flash
-            .blocking_erase(
-                self.cv_data_offset,
-                self.cv_data_offset + self.cache.len() as u32,
-            )
-            .map_err(|e| {
-                error!("error erasing flash: {:?}", e);
-                Error::Io
-            })?;
+        let from = self.cv_data_range.start;
+        let to = self.cv_data_range.end;
+
+        debug!("erasing flash from {} to {}", from, to);
+
+        self.flash.blocking_erase(from, to).map_err(|e| {
+            error!("error erasing flash: {:?}", e);
+            Error::Io
+        })?;
 
         self.flash
-            .blocking_write(self.cv_data_offset, self.cache.as_ref())
+            .blocking_write(from, self.cache.as_ref())
             .map_err(|e| {
                 error!("error writing flash: {:?}", e);
                 Error::Io
@@ -52,13 +56,19 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> FlashStore<'d, T, FLASH_SIZE> {
     /// Reads the configuration variables from flash into `data`.
     ///
     /// `data` must be aligned to a 4-byte boundary.
-    async fn read_cvs(
-        flash: &mut Flash<'d, T, Async, FLASH_SIZE>,
+    async fn read_cv_array_aligned(
+        flash: &mut RpFlash<'d, T, Async, FLASH_SIZE>,
         offset: u32,
         data: &mut [u8],
     ) -> Result<(), Error> {
         // verify alignment
         assert_eq!((data.as_ptr() as u32) % 4, 0);
+
+        debug!(
+            "reading {} bytes from flash at offset 0x{:x}...",
+            data.len(),
+            offset
+        );
 
         flash.read(offset, data).await.map_err(|e| {
             error!("error reading flash: {:?}", e);
@@ -70,7 +80,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> FlashStore<'d, T, FLASH_SIZE> {
 
     /// Reads a new configuration variable array from flash.
     async fn read_cv_array(
-        flash: &mut Flash<'d, T, Async, FLASH_SIZE>,
+        flash: &mut RpFlash<'d, T, Async, FLASH_SIZE>,
         offset: u32,
     ) -> Result<AlignedCvArray, Error> {
         // Allocate the cache without initializing it; we'll fill it directly from flash.
@@ -79,14 +89,14 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> FlashStore<'d, T, FLASH_SIZE> {
         let cache_ptr = uninit_cache.as_mut_ptr() as *mut u8;
         let raw_bytes: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(cache_ptr, CV_SIZE) };
 
-        Self::read_cvs(flash, offset, raw_bytes).await?;
+        Self::read_cv_array_aligned(flash, offset, raw_bytes).await?;
 
         // SAFETY: read_cvs wrote all CV_SIZE bytes into the cache.
         Ok(unsafe { uninit_cache.assume_init() })
     }
 }
 
-impl<'d, T: Instance, const FLASH_SIZE: usize> Store for FlashStore<'d, T, FLASH_SIZE> {
+impl<'d, T: Instance, const FLASH_SIZE: usize> Store for Flash<'d, T, FLASH_SIZE> {
     fn read_byte(&self, address: usize) -> u8 {
         self.cache[address - 1]
     }

@@ -34,6 +34,7 @@ fn main() {
 
     println!("cargo:rustc-link-arg-bins=--nmagic");
     println!("cargo:rustc-link-arg-bins=-Tlink.x");
+    println!("cargo:rustc-link-arg-bins=-Tlink-rp.x");
 
     #[cfg(feature = "defmt")]
     println!("cargo:rustc-link-arg-bins=-Tdefmt.x");
@@ -44,12 +45,12 @@ fn extract_flash_info() {
         .expect("build.rs: failed to read memory.x from project root");
 
     let re_flash =
-        Regex::new(r"APP_FLASH\s*:\s*ORIGIN\s*=\s*(?P<origin>.*),\s*LENGTH\s*=\s*(?P<length>.*)")
+        Regex::new(r"CV_FLASH\s*:\s*ORIGIN\s*=\s*(?P<origin>.*),\s*LENGTH\s*=\s*(?P<length>.*)")
             .unwrap();
 
     let matches = re_flash
         .captures(&mem)
-        .expect("build.rs: failed to find APP_FLASH in memory.x");
+        .expect("build.rs: failed to find CV_FLASH in memory.x");
 
     let origin = parse_add_sub_expr(matches.name("origin").unwrap().as_str()).unwrap();
     let flash_len = parse_add_sub_expr(matches.name("length").unwrap().as_str()).unwrap();
@@ -59,8 +60,8 @@ fn extract_flash_info() {
     fs::write(
         &out,
         format!(
-            "pub const APP_FLASH_ORIGIN: usize = {};\n\
-             pub const FLASH_SIZE: usize = {};\n",
+            "pub const CV_FLASH_ORIGIN: usize = {};\n\
+             pub const CV_FLASH_SIZE: usize = {};\n",
             origin, flash_len
         ),
     )

@@ -4,9 +4,10 @@
 // This must go FIRST so that all the other modules see its macros.
 pub(crate) mod log;
 
-mod cv;
 mod motor;
+mod store;
 mod timer;
+mod timers;
 mod transport;
 
 #[allow(unused_imports)]
@@ -30,7 +31,7 @@ use ::motor::speed::{
     Config as SpeedConfig, Controller as SpeedController, PidConfig, StartupConfig, accel,
 };
 use assign_resources::assign_resources;
-use dcc::cv::store::StoreExt;
+use dcc::cv::store::{StoreExt, ensure_populated, reset};
 use dcc::handler::{Handler, Op};
 use embassy_executor::{Executor, Spawner};
 use embassy_rp::adc;
@@ -47,13 +48,15 @@ use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
 use embassy_time::Duration;
 use static_cell::StaticCell;
 
+const FLASH_SIZE: usize = 2 * 1024 * 1024;
+
 // Provide FLASH_SIZE from build.rs-generated file.
 include!(concat!(env!("OUT_DIR"), "/flash_consts.rs"));
 
 type RawDecoder = PioDccDecoder<'static, PIO0, DMA_CH0, 0>;
 type AppFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
 
-type Packethandler = Handler<InstantTimer, cv::FlashStore<'static, FLASH, FLASH_SIZE>>;
+type Packethandler = Handler<InstantTimer, store::Flash<'static, FLASH, FLASH_SIZE>>;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
@@ -106,7 +109,9 @@ async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDeco
     loop {
         let packet = decoder.read().await;
 
-        debug!("addr={} packet={:?}", packet.addr(), packet);
+        if cfg!(feature = "verbose-transport") {
+            debug!("addr={} packet={:?}", packet.addr(), packet);
+        }
 
         PACKET_CHANNEL.publish_immediate(packet);
 
@@ -136,6 +141,8 @@ async fn packet_handler(mut handler: Packethandler) {
 
     let mut receiver = unwrap!(PACKET_CHANNEL.subscriber());
 
+    let mut last_command: Option<Op> = None;
+
     loop {
         // TODO: if a packet hasn't been received within a heartbeat timeout
         //       we should execute a reset operation.
@@ -143,44 +150,42 @@ async fn packet_handler(mut handler: Packethandler) {
         //       in a while
         let packet = receiver.next_message_pure().await;
 
-        trace!("handling packet: {:?}", packet);
+        if cfg!(feature = "verbose-transport") {
+            trace!("handling packet: {:?}", packet);
+        }
 
         let op = handler.handle(&packet);
 
-        trace!("packet result: {:?}", op);
+        if cfg!(feature = "verbose-transport") {
+            trace!("packet result: {:?}", op);
+        }
 
         match op {
-            Ok(Some(op)) => match op {
-                Op::AcknowledgeCv => MOTOR_CHANNEL.send(Command::AcknowledgeCv).await,
-                Op::Reset => MOTOR_CHANNEL.send(Command::Reset).await,
-                Op::Velocity128(sp) => MOTOR_CHANNEL.send(Command::SetVelocity128(sp)).await,
-            },
+            Ok(Some(op)) => {
+                match op {
+                    Op::AcknowledgeCv => MOTOR_CHANNEL.send(Command::AcknowledgeCv).await,
+                    Op::Reset => MOTOR_CHANNEL.send(Command::Reset).await,
+                    Op::Velocity128(sp) => {
+                        if last_command != Some(op) {
+                            // only send the velocity command if something changed. This prevents
+                            // unnecessary work from being performed downstream
+                            MOTOR_CHANNEL.send(Command::SetVelocity128(sp)).await
+                        }
+                    }
+                }
+                last_command = Some(op);
+            }
             Ok(None) => { /* noop */ }
             Err(e) => {
-                error!("error handling packet: {:?}", e);
+                error!("error handling packet: {:?} {:?}", e, packet);
             }
         }
     }
 }
 
-// #[embassy_executor::task]
-// async fn motor_handler(motor_controller: RpMotorController<DMA_CH2>, speed_control: SpeedController) {
-//     loop {
-//         // TODO: if a packet hasn't been received within a heartbeat timeout
-//         //       we should execute a reset operation.
-//         //       We should probably do the same if we haven received a packet addressed to us
-//         //       in a while
-//         let r = MOTOR_CHANNEL.receiver();
-//         let packet = MOTOR_CHANNEL.receive().await;
-//
-//         match packet {
-//             Command::AcknowledgeCv => {}
-//         }
-//     }
-// }
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
+    info!("dcc-rp2040-rs startup!");
     let p = embassy_rp::init(Default::default());
 
     // Override bootloader watchdog
@@ -202,13 +207,20 @@ async fn main(spawner: Spawner) {
 
     let flash = {
         let fr = r.flash;
-        embassy_rp::flash::Flash::<_, Async, FLASH_SIZE>::new(fr.flash, fr.dma)
+        AppFlash::new(fr.flash, fr.dma)
     };
 
     let mut cv_store =
-        unwrap!(cv::FlashStore::new(flash, APP_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
+        unwrap!(store::Flash::new(flash, CV_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
+
+    unwrap!(ensure_populated(&mut cv_store));
+
+    if cfg!(feature = "defmt") {
+        info!("decoder addr = {}", cv_store.addr());
+    }
 
     let output_max = (embassy_rp::clocks::clk_sys_freq() / cv_store.motor_pwm_frequency()) as u16;
+    debug!("max PID output: {}", output_max);
 
     let mut motor_controller = {
         let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
@@ -217,6 +229,7 @@ async fn main(spawner: Spawner) {
             motor::Config {
                 pwm_max_output: output_max,
                 pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
+                emf_measurement_delay: unwrap!(cv_store.emf_measurement_delay().try_into()),
             },
             r.motor,
             adc,
@@ -237,6 +250,8 @@ async fn main(spawner: Spawner) {
                     }
                     let measured_offset = measured_offset.clamp(0, (u8::MAX - 1) as u16) as u8;
 
+                    debug!("calculated adc offset: {}", measured_offset);
+
                     unwrap!(cv_store.write_emf_adc_offset(measured_offset));
                     measured_offset
                 }
@@ -255,6 +270,8 @@ async fn main(spawner: Spawner) {
             v_mid: cv_store.v_mid(),
             v_high: cv_store.v_high(),
         };
+
+        debug!("building speed table: config={:?}", config);
 
         table::build(config)
     };
@@ -315,7 +332,9 @@ async fn main(spawner: Spawner) {
     spawner.must_spawn(packet_handler(ph));
     motor::handler::spawn(
         spawner,
-        pid_sample_time.try_into().unwrap_or(Duration::from_millis(7)),
+        pid_sample_time
+            .try_into()
+            .unwrap_or(Duration::from_millis(7)),
         motor_controller,
         speed_control,
         accel_helper,
