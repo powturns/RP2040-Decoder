@@ -11,6 +11,7 @@ pub fn filtered_mean(data: &[u16], std_deviations: u16) -> Option<u16> {
 
     let mean: u16 = (data.iter().map(|&e| e as u64).sum::<u64>() / data.len() as u64) as u16;
 
+
     if data.len() == 1 {
         return Some(mean);
     }

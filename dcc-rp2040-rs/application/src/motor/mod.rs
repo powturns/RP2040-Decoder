@@ -112,7 +112,7 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
 
         buf.sort_unstable();
 
-        // outlier removal
+        // outlier removal - FIXME: use a configurable cutoff value
         let l_side_arr_cutoff = 15; // CV_ARRAY_FLASH[62]
         let r_side_arr_cutoff = 15; // CV_ARRAY_FLASH[63]
 
@@ -138,7 +138,17 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         self.stop()?;
 
         Timer::after_secs(1).await;
+
         debug!("Measuring ADC offset in reverse direction. n={}", buf.len());
+        let _ = &mut self
+            .rev
+            .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+            .await?;
+        let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
+        debug!("offset_avg_rev={}", offset_avg_rev);
+
+        Timer::after_secs(1).await;
+        debug!("Measuring ADC offset in forward direction. n={}", buf.len());
         let _ = &mut self
             .fwd
             .measure_emf(&mut self.adc, buf, self.dma.reborrow())
@@ -146,14 +156,6 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
         debug!("offset_avg_fwd={}", offset_avg_fwd);
 
-        Timer::after_secs(1).await;
-        debug!("Measuring ADC offset in forward direction. n={}", buf.len());
-        let _ = &mut self
-            .rev
-            .measure_emf(&mut self.adc, buf, self.dma.reborrow())
-            .await?;
-        let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
-        debug!("offset_avg_rev={}", offset_avg_rev);
 
         Ok(((offset_avg_fwd as u32 + offset_avg_rev as u32) / 2) as u16)
     }
@@ -227,7 +229,7 @@ impl DirectionControl {
         adc.read_many(
             &mut self.emf,
             buf,
-            0, // sample at the full 500 khz rate
+            0, // sample at the full 500,000 samples per second
             dma,
         )
         .await

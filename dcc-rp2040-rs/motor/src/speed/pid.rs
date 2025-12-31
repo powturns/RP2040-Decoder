@@ -40,21 +40,12 @@ pub struct Config {
     pub filter_tc: Duration,
 
     /// Time-invariant integral gain (ki). The library scales this by the sample time.
-    ///
-    /// FIXME
-    /// CV 50 / 10
     pub ki: f32,
 
     /// Time-invariant derivative gain (kd). The library scales this by the sample time.
-    ///
-    /// FIXME
-    /// CV 51 / 10_000
     pub kd: f32,
 
     /// Maximum controller output (PWM top).
-    ///
-    /// FIXME
-    /// (float) (_125M / (CV9 * 100 + 10000));
     pub output_max: u16,
 
     /// Gain scheduling parameters for Kp based on the setpoint.
@@ -64,7 +55,7 @@ pub struct Config {
     /// Kp level at start of low range
     pub kp_y0: f32,
 
-    /// Kp level at end of low range
+    /// Kp level at end of low range / start of high range
     pub kp_y1: f32,
 
     /// Kp level at end of high range
@@ -206,7 +197,7 @@ impl Controller {
         let setpoint = setpoint.clamp(0.0, self.params.max_setpoint);
         // Dynamic Kp scheduling based on setpoint
         let kp = self.kp_for_setpoint(setpoint);
-        self.pid.config_mut().set_kp(kp)?; // FIXME: error handling
+        self.pid.config_mut().set_kp(kp)?;
 
         // Compute control output
         Ok(self.pid.compute(

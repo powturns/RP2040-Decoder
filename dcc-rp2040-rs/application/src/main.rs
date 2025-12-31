@@ -83,9 +83,9 @@ assign_resources! {
     }
     motor: MotorResources {
         fwd_pin: PIN_23,
-        fwd_emf_in: PIN_29,
+        fwd_emf_in: PIN_28,
         rev_pin: PIN_22,
-        rev_emf_in: PIN_28,
+        rev_emf_in: PIN_29,
         pwm_slice: PWM_SLICE3,
     }
     motor_dma: MotorDma {

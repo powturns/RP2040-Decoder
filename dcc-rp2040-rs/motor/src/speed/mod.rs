@@ -77,7 +77,7 @@ impl Controller {
             return Ok(Some(0));
         }
 
-        let measurement = measurement - self.config.adc_offset;
+        let measurement = (measurement - self.config.adc_offset).max(0.0); // TODO: should we actually clamp this to zero?
 
         if cfg!(feature = "verbose") {
             trace!("compute(mode={} measurement={} setpoint={})", self.mode, measurement, setpoint);
@@ -85,7 +85,10 @@ impl Controller {
 
         match self.mode {
             Startup => match self.startup.compute(measurement) {
-                ComputeResult::Output(out) => Ok(Some(out)),
+                ComputeResult::Output(out) => {
+                    trace!("startup(measurement={} setpoint={}) -> output={}", measurement, setpoint, out);
+                    Ok(Some(out))
+                },
                 ComputeResult::Handover(ff) => {
                     trace!("Switching to PID mode with feedforward={}", ff);
                     self.mode = Pid(ff);
@@ -96,6 +99,8 @@ impl Controller {
                 let out = self
                     .pid
                     .compute(measurement, setpoint as f32, timestamp_ms, ff)?;
+
+                trace!("pid(measurement={} setpoint={}) -> output={}", measurement, setpoint, out);
 
                 Ok(Some(out))
             }

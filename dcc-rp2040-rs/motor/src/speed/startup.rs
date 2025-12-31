@@ -6,9 +6,6 @@ const START_OUTPUT_ARR_LEN: usize = 16;
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     /// Maximum controller output (PWM top).
-    ///
-    /// FIXME
-    /// (float) (_125M / (CV9 * 100 + 10000));
     pub output_max: u16,
 
     /// The PID feed forward factor.

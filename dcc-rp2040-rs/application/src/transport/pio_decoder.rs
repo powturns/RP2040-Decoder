@@ -90,8 +90,10 @@ impl<'d, T: Instance, C: Channel, const SM: usize> RawDccDecoder for PioDccDecod
         let din: &mut [u32] = bytemuck::cast_slice_mut(buff);
         rx.dma_pull(self.dma.reborrow(), din, true).await;
 
-        let len = 7 - buff[7] as usize;
+        let len = 7_usize.saturating_sub(buff[7] as usize);
         let buff = &mut buff[..len];
+
+        // received bytes come inverted off the wire
         for byte in buff.iter_mut() {
             *byte = !*byte;
         }
