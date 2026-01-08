@@ -213,7 +213,7 @@ impl<T: Store> StoreExt for T {
     }
 
     fn motor_pwm_frequency(&self) -> u32 {
-        self.read_byte(MotorPwmFrequency as usize) as u32 * 100 + 1000
+        self.read_byte(MotorPwmFrequency as usize) as u32 * 100 + 10_000
     }
 
     fn emf_adc_offset(&self) -> Option<u8> {
@@ -240,7 +240,7 @@ impl<T: Store> StoreExt for T {
 
 pub fn ensure_populated(store: &mut impl Store) -> Result<(), Error> {
     let primary_addr = store.addr();
-    debug!("primary_addr = {}", primary_addr);
+    trace!("ensure_populated(primary_addr={})", primary_addr);
 
     if primary_addr == 0 {
         warn!("CV store is empty. Resetting to default values.");

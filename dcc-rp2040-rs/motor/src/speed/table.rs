@@ -5,17 +5,19 @@ pub type SpeedTable = [u16; SPEED_TABLE_LEN];
 #[cfg_attr(test, derive(Debug))]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
-    /// Used to define the voltage drive level used as the start voltage on the motor.
+    /// Used to define the bemf level used as the start voltage on the motor.
     pub v_start: u8,
 
-    /// Vmid specifies the voltage drive level at the middle speed step.
+    /// Vmid specifies the bemf drive level at the middle speed step.
     pub v_mid: u8,
 
-    /// Vhigh is used to specify the motor voltage drive levels at the maximum speed step.
+    /// Vhigh is used to specify the motor bemf drive levels at the maximum speed step.
     pub v_high: u8,
 }
 
 /// Builds a speed table from the specified configuration.
+///
+/// The speed table contains back-emf levels for a given throttle level (the index).
 pub fn build(config: Config) -> SpeedTable {
     // This method uses floating point operations. The intention is it isn't
     // called often. If this changes, we should implement integer approximations.

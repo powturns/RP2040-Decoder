@@ -47,6 +47,7 @@ use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
 use embassy_time::Duration;
 use static_cell::StaticCell;
+use dcc::cv::store::Store;
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
@@ -213,24 +214,44 @@ async fn main(spawner: Spawner) {
     let mut cv_store =
         unwrap!(store::Flash::new(flash, CV_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
 
+    // let MAX_MEASUREMENT = 550;
+    // let vhigh = (MAX_MEASUREMENT/16) as u8;
+    // let vmid = (vhigh as f32 * 0.6) as u8;
+    // info!("vhigh={}, vmid={}", vhigh, vmid);
+    // cv_store.write_byte(5, vhigh);
+    // cv_store.write_byte(6, vmid);
+
+    // let PWM_FREQUENCY = 25_000_u32;
+    // let pwm = (PWM_FREQUENCY-10_000)/100;
+    // info!("pwm={}", pwm);
+    // cv_store.write_byte(9, pwm as u8);
+    //
+    // // feed forward factor to ~0.5
+    // cv_store.write_byte(47, 200);
+
     unwrap!(ensure_populated(&mut cv_store));
 
     if cfg!(feature = "defmt") {
         info!("decoder addr = {}", cv_store.addr());
     }
 
-    let output_max = (embassy_rp::clocks::clk_sys_freq() / cv_store.motor_pwm_frequency()) as u16;
-    debug!("max PID output: {}", output_max);
+    let motor_pwm_frequency = cv_store.motor_pwm_frequency();
+    debug!("motor_pwm_frequency={}", motor_pwm_frequency);
+    let output_max = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency) as u16;
 
     let mut motor_controller = {
         let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
 
+        let config = motor::Config {
+            pwm_max_output: output_max,
+            pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
+            emf_measurement_delay: unwrap!(cv_store.emf_measurement_delay().try_into()),
+        };
+
+        debug!("motor::Config={:?}", config);
+
         RpMotorController::new(
-            motor::Config {
-                pwm_max_output: output_max,
-                pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
-                emf_measurement_delay: unwrap!(cv_store.emf_measurement_delay().try_into()),
-            },
+            config,
             r.motor,
             adc,
             r.motor_dma.dma,
@@ -250,7 +271,7 @@ async fn main(spawner: Spawner) {
                     }
                     let measured_offset = measured_offset.clamp(0, (u8::MAX - 1) as u16) as u8;
 
-                    debug!("calculated adc offset: {}", measured_offset);
+                    info!("calculated adc offset: {}", measured_offset);
 
                     unwrap!(cv_store.write_emf_adc_offset(measured_offset));
                     measured_offset
@@ -271,7 +292,7 @@ async fn main(spawner: Spawner) {
             v_high: cv_store.v_high(),
         };
 
-        debug!("building speed table: config={:?}", config);
+        debug!("table::Config={:?}", config);
 
         table::build(config)
     };
@@ -297,6 +318,8 @@ async fn main(spawner: Spawner) {
             adc_offset as f32,
         );
 
+        debug!("motor::speed::Config={:?}", config);
+
         unwrap!(SpeedController::new(config))
     };
 
@@ -306,6 +329,8 @@ async fn main(spawner: Spawner) {
             decel_rate: cv_store.deceleration_rate(),
             loop_delay: cv_store.speed_step_period(),
         };
+
+        debug!("accel::Config={:?}", config);
 
         accel::Helper::new(config)
     };

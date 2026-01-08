@@ -40,6 +40,15 @@ enum Mode {
     Pid(f32),
 }
 
+/// A unified speed controller that uses the startup controller before the motor is moving
+/// then switches to the PID controller after it is running.
+///
+/// During the startup phase, the controller doesn't consider the target setpoint (from the speed table);
+/// its only goal is to get the motor moving quickly. Once the motor starts to move, the setpoint is
+/// considered.
+///
+/// This controller uses back emf for the target and measured values and calculates a PWM
+/// level for the output.
 pub struct Controller {
     config: Config,
     mode: Mode,

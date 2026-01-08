@@ -27,9 +27,13 @@ impl From<pwm::PwmError> for Error {
     }
 }
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     pub pwm_max_output: u16,
+
+    #[cfg_attr(feature = "defmt", defmt(Debug2Format))]
     pub pwm_clk_divider: fixed::FixedU16<fixed::types::extra::U4>,
+
     pub emf_measurement_delay: Duration,
 }
 

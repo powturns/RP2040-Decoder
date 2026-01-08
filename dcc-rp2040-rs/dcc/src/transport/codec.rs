@@ -11,6 +11,7 @@ impl DccCodec {
         //       to minimize the amount of data we move around
 
         if raw.len() > 6 {
+            trace!("discarding packet length={}", raw.len());
             return Err(PacketError::Oversize);
         }
 

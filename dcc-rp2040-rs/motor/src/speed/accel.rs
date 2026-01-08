@@ -1,6 +1,7 @@
 use crate::{SpeedStep, VelocitySetpoint};
 use core::time::Duration;
 
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
     // CV3
     pub accel_rate: u8,
