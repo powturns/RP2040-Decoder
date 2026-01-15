@@ -1,5 +1,7 @@
 use crate::read_extended_address;
 use crate::transport::{is_basic_address, is_mf_extended_address};
+use core::marker::PhantomData;
+use core::ops::{Index, Range};
 use heapless::Vec;
 use int_enum::IntEnum;
 use motor::{Direction, SpeedStep, VelocitySetpoint};
@@ -111,6 +113,8 @@ pub enum OperationInstructionType {
 #[cfg_attr(test, derive(Debug))]
 pub enum OperationModeInstruction {
     AdvancedOperations(AdvancedOperationsInstruction),
+    FunctionGroupOne(FunctionGroupInstruction<FgiOne>),
+    FunctionGroupTwo(FunctionGroupInstruction<FgiTwo>),
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -120,13 +124,151 @@ pub enum AdvancedOperationsInstruction {
     SpeedStepControl(VelocitySetpoint),
 }
 
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
+pub struct FunctionGroupInstruction<T> {
+    instruction: u8,
+    phantom_data: PhantomData<T>,
+}
+
+impl<T> FunctionGroupInstruction<T> {
+    pub fn new(instruction: u8) -> Self {
+        Self {
+            instruction,
+            phantom_data: PhantomData,
+        }
+    }
+}
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
+pub struct FgiOne;
+
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
+pub struct FgiTwo;
+
+trait FunctionGroupInstructionRange: Index<u8> {
+    fn range(&self) -> Range<u8>;
+}
+
+impl FunctionGroupInstructionRange for FunctionGroupInstruction<FgiOne> {
+    fn range(&self) -> Range<u8> {
+        0..5
+    }
+}
+
+impl Index<u8> for FunctionGroupInstruction<FgiOne> {
+    type Output = bool;
+
+    fn index(&self, index: u8) -> &Self::Output {
+        // Bits 0-3 control F1-F4, bit 4 controls FL
+        match index {
+            0..=4 => {
+                if (self.instruction & (1 << index)) != 0 {
+                    &true
+                } else {
+                    &false
+                }
+            }
+            _ => panic!("Index out of bounds: valid indices are 0-4 (F1-F4 and FL)"),
+        }
+    }
+}
+
+impl<'a, T, O: Sized + Copy> IntoIterator for &'a FunctionGroupInstruction<T>
+where
+    FunctionGroupInstruction<T>: FunctionGroupInstructionRange<Output = O>,
+{
+    type Item = (u8, O);
+    type IntoIter = FunctionGroupInstructionIterator<'a, FunctionGroupInstruction<T>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        let range = self.range();
+        FunctionGroupInstructionIterator {
+            index: range.start,
+            range,
+            instruction: &self,
+        }
+    }
+}
+
+pub struct FunctionGroupInstructionIterator<'a, I> {
+    index: u8,
+    range: Range<u8>,
+    instruction: &'a I,
+}
+
+impl<'a, T: Index<u8, Output = O>, O: Sized + Copy> Iterator
+    for FunctionGroupInstructionIterator<'a, T>
+{
+    type Item = (u8, T::Output);
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if self.range.contains(&self.index) {
+            let result = Some((self.index, self.instruction[self.index]));
+            self.index += 1;
+
+            result
+        } else {
+            None
+        }
+    }
+}
+
+impl FunctionGroupInstructionRange for FunctionGroupInstruction<FgiTwo> {
+    fn range(&self) -> Range<u8> {
+        // Bit 4 (S) determines which group:
+        // S=1: F5-F8 (range 5..9)
+        // S=0: F9-F12 (range 9..13)
+        let s_bit = (self.instruction >> 4) & 1;
+        if s_bit == 1 { 5..9 } else { 9..13 }
+    }
+}
+
+impl Index<u8> for FunctionGroupInstruction<FgiTwo> {
+    type Output = bool;
+
+    fn index(&self, index: u8) -> &Self::Output {
+        // Bit 4 (S) determines which group: 1 = F5-F8, 0 = F9-F12
+        // Bits 0-3 (DDDD) contain the function states
+        let s_bit = (self.instruction >> 4) & 1;
+
+        // Determine valid range based on S bit
+        let valid_range = if s_bit == 1 { 5..9 } else { 9..13 };
+
+        if !valid_range.contains(&index) {
+            panic!(
+                "Index out of bounds: valid indices for this instruction are {:?}",
+                valid_range
+            );
+        }
+
+        // Calculate bit position (0-3) based on the function number
+        let bit_position = if s_bit == 1 {
+            index - 5 // F5-F8 map to bits 0-3
+        } else {
+            index - 9 // F9-F12 map to bits 0-3
+        };
+
+        // Extract the bit state
+        if (self.instruction & (1 << bit_position)) != 0 {
+            &true
+        } else {
+            &false
+        }
+    }
+}
 impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
     type Error = Error;
 
     fn try_from(value: &'a Packet) -> Result<Self, Self::Error> {
         let data = &value.data[value.address_length()?..];
 
-        let first = data.first().ok_or(Error::Undersize)?;
+        let first = *data.first().ok_or(Error::Undersize)?;
 
         match OperationInstructionType::try_from(first >> 5)
             .map_err(|_| Error::InvalidInstruction)?
@@ -164,8 +306,16 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
             }
             OperationInstructionType::SpeedDirectionReverse => Err(Error::InvalidInstruction),
             OperationInstructionType::SpeedDirectionForward => Err(Error::InvalidInstruction),
-            OperationInstructionType::FunctionGroup1 => Err(Error::InvalidInstruction),
-            OperationInstructionType::FunctionGroup2 => Err(Error::InvalidInstruction),
+            OperationInstructionType::FunctionGroup1 => {
+                Ok(OperationModeInstruction::FunctionGroupOne(
+                    FunctionGroupInstruction::<FgiOne>::new(first),
+                ))
+            }
+            OperationInstructionType::FunctionGroup2 => {
+                Ok(OperationModeInstruction::FunctionGroupTwo(
+                    FunctionGroupInstruction::<FgiTwo>::new(first),
+                ))
+            }
             OperationInstructionType::FeatureExpansion => Err(Error::InvalidInstruction),
             OperationInstructionType::CVAccess => Err(Error::InvalidInstruction),
         }
@@ -226,6 +376,102 @@ mod tests {
     use super::*;
     use crate::testing::pkt;
     use crate::transport::packet::AdvancedOperationsInstruction::SpeedStepControl;
+
+    #[test]
+    fn function_group_1_instruction() {
+        // Group 1: 100 D D D D D (FL F4 F3 F2 F1)
+        // Example: 100 1 0 0 1 1 -> FL=1, F4=0, F3=0, F2=1, F1=1
+        // Byte = 0b10010011 = 0x93
+        // Address 3
+        let pkt_data = [3, 0x93, 0x90]; // Checksum 3 ^ 0x93 = 0x90
+        let p = pkt(&pkt_data);
+
+        let op_instr = OperationModeInstruction::try_from(&p).unwrap();
+
+        if let OperationModeInstruction::FunctionGroupOne(fgi) = op_instr {
+            // Test indexing
+            assert_eq!(fgi[0], true, "F1 should be true");
+            assert_eq!(fgi[1], true, "F2 should be true");
+            assert_eq!(fgi[2], false, "F3 should be false");
+            assert_eq!(fgi[3], false, "F4 should be false");
+            assert_eq!(fgi[4], true, "FL should be true");
+
+            // Test iteration
+            let mut iter = fgi.into_iter();
+            assert_eq!(iter.next(), Some((0, true)));
+            assert_eq!(iter.next(), Some((1, true)));
+            assert_eq!(iter.next(), Some((2, false)));
+            assert_eq!(iter.next(), Some((3, false)));
+            assert_eq!(iter.next(), Some((4, true)));
+            assert_eq!(iter.next(), None);
+        } else {
+            panic!("Expected FunctionGroupOne");
+        }
+    }
+
+    #[test]
+    fn function_group_2_instruction_s1() {
+        // Group 2: 101 S D D D D
+        // S=1 -> F5-F8
+        // 101 1 F8 F7 F6 F5
+        // Example: 101 1 0 1 0 1 -> F8=0, F7=1, F6=0, F5=1
+        // Byte = 0b10110101 = 0xB5
+        // Address 3
+        let pkt_data = [3, 0xB5, 0xB6]; // Checksum 3 ^ 0xB5 = 0xB6
+        let p = pkt(&pkt_data);
+
+        let op_instr = OperationModeInstruction::try_from(&p).unwrap();
+
+        if let OperationModeInstruction::FunctionGroupTwo(fgi) = op_instr {
+            // Test indexing
+            assert_eq!(fgi[5], true, "F5 should be true");
+            assert_eq!(fgi[6], false, "F6 should be false");
+            assert_eq!(fgi[7], true, "F7 should be true");
+            assert_eq!(fgi[8], false, "F8 should be false");
+
+            // Test iteration
+            let mut iter = fgi.into_iter();
+            assert_eq!(iter.next(), Some((5, true)));
+            assert_eq!(iter.next(), Some((6, false)));
+            assert_eq!(iter.next(), Some((7, true)));
+            assert_eq!(iter.next(), Some((8, false)));
+            assert_eq!(iter.next(), None);
+        } else {
+            panic!("Expected FunctionGroupTwo");
+        }
+    }
+
+    #[test]
+    fn function_group_2_instruction_s0() {
+        // Group 2: 101 S D D D D
+        // S=0 -> F9-F12
+        // 101 0 F12 F11 F10 F9
+        // Example: 101 0 1 1 0 0 -> F12=1, F11=1, F10=0, F9=0
+        // Byte = 0b10101100 = 0xAC
+        // Address 3
+        let pkt_data = [3, 0xAC, 0xAF]; // Checksum 3 ^ 0xAC = 0xAF
+        let p = pkt(&pkt_data);
+
+        let op_instr = OperationModeInstruction::try_from(&p).unwrap();
+
+        if let OperationModeInstruction::FunctionGroupTwo(fgi) = op_instr {
+            // Test indexing
+            assert_eq!(fgi[9], false, "F9 should be false");
+            assert_eq!(fgi[10], false, "F10 should be false");
+            assert_eq!(fgi[11], true, "F11 should be true");
+            assert_eq!(fgi[12], true, "F12 should be true");
+
+            // Test iteration
+            let mut iter = fgi.into_iter();
+            assert_eq!(iter.next(), Some((9, false)));
+            assert_eq!(iter.next(), Some((10, false)));
+            assert_eq!(iter.next(), Some((11, true)));
+            assert_eq!(iter.next(), Some((12, true)));
+            assert_eq!(iter.next(), None);
+        } else {
+            panic!("Expected FunctionGroupTwo");
+        }
+    }
 
     // The following tests are based on NMRA DCC standards (S-9.2 and S-9.2.3):
     // - Service mode instruction bytes reside in 0x70..=0x7F (0b0111xxxx)

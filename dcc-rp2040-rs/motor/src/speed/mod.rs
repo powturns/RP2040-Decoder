@@ -1,3 +1,4 @@
+use core::sync::atomic::{AtomicU32, Ordering};
 use crate::speed::Mode::{Pid, Startup};
 use crate::speed::startup::ComputeResult;
 
@@ -75,6 +76,7 @@ impl Controller {
         self.mode = Startup;
     }
 
+    /// Compute the PID output from the measured back EMF and current setpoint.
     pub fn compute(
         &mut self,
         measurement: f32,
@@ -92,10 +94,20 @@ impl Controller {
             trace!("compute(mode={} measurement={} setpoint={})", self.mode, measurement, setpoint);
         }
 
+        static mut ITERATION_COUNT: u32 = 0;
+        const SAMPLE_RATE: u32 = 100;
+        let count = unsafe {
+            ITERATION_COUNT = ITERATION_COUNT.wrapping_add(1);
+
+            ITERATION_COUNT
+        };
+
         match self.mode {
             Startup => match self.startup.compute(measurement) {
                 ComputeResult::Output(out) => {
-                    trace!("startup(measurement={} setpoint={}) -> output={}", measurement, setpoint, out);
+                    if count % SAMPLE_RATE == 0 {
+                        trace!("startup(measurement={}) -> output={}", measurement, out);
+                    }
                     Ok(Some(out))
                 },
                 ComputeResult::Handover(ff) => {
@@ -109,7 +121,9 @@ impl Controller {
                     .pid
                     .compute(measurement, setpoint as f32, timestamp_ms, ff)?;
 
-                trace!("pid(measurement={} setpoint={}) -> output={}", measurement, setpoint, out);
+                if count % SAMPLE_RATE == 0 {
+                    trace!("pid(measurement={} setpoint={}) -> output={}", measurement, setpoint, out);
+                }
 
                 Ok(Some(out))
             }

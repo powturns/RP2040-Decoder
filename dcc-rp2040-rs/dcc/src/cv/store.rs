@@ -1,7 +1,7 @@
 use crate::cv::Cv::*;
+use crate::cv::DEFAULT_VALUES;
 use crate::read_extended_address;
 use core::time::Duration;
-use crate::cv::DEFAULT_VALUES;
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -260,7 +260,7 @@ mod tests {
     #[cfg(test)]
     extern crate std;
     use super::*;
-    use crate::cv::CV_SIZE;
+    use crate::cv::{Cv, CV_SIZE};
     use crate::testing::MockStore;
 
     #[test]

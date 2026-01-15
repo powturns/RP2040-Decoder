@@ -64,6 +64,8 @@ fn is_mf_extended_address(raw_packet: &[u8]) -> bool {
 mod tests {
     #[cfg(test)]
     extern crate std;
+
+    use heapless::Vec;
     use super::*;
 
     /// Helper function to create a Packet directly from raw bytes

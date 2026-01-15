@@ -72,6 +72,12 @@ where
             OperationModeInstruction::AdvancedOperations(o) => match o {
                 AdvancedOperationsInstruction::SpeedStepControl(v) => Ok(Some(Op::Velocity128(v))),
             },
+            OperationModeInstruction::FunctionGroupOne(_) => {
+                todo!()
+            }
+            OperationModeInstruction::FunctionGroupTwo(_) => {
+                todo!()
+            }
         }
     }
 
