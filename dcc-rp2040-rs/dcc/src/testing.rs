@@ -1,8 +1,8 @@
-use alloc::format;
 use crate::Timer;
 use crate::cv::CV_SIZE;
 use crate::cv::store::{Error, Store};
 use crate::transport::packet::Packet;
+use alloc::format;
 use core::any::type_name;
 use heapless::Vec;
 

@@ -4,6 +4,7 @@
 // This must go FIRST so that all the other modules see its macros.
 pub(crate) mod log;
 
+mod functions;
 mod motor;
 mod store;
 mod timer;
@@ -31,13 +32,12 @@ use ::motor::speed::{
     Config as SpeedConfig, Controller as SpeedController, PidConfig, StartupConfig, accel,
 };
 use assign_resources::assign_resources;
-use dcc::cv::store::{StoreExt, ensure_populated, reset};
+use dcc::cv::store::{StoreExt, ensure_populated};
 use dcc::handler::{Handler, Op};
-use embassy_executor::{Executor, Spawner};
+use embassy_executor::{Spawner};
 use embassy_rp::adc;
 use embassy_rp::adc::Adc;
 use embassy_rp::flash::{Async, FLASH_BASE, Flash};
-use embassy_rp::multicore::Stack;
 use embassy_rp::peripherals::{DMA_CH0, FLASH, PIO0};
 use embassy_rp::pio;
 use embassy_rp::pio::Pio;
@@ -46,8 +46,7 @@ use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
 use embassy_time::Duration;
-use static_cell::StaticCell;
-use dcc::cv::store::Store;
+use functions::handler::Handler as FunctionGroupHandler;
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
@@ -91,6 +90,25 @@ assign_resources! {
     }
     motor_dma: MotorDma {
         dma: DMA_CH2,
+    }
+    function_group: FunctionGroupOutputResources {
+        gpio0: PIN_0,
+        gpio1: PIN_1,
+        gpio2: PIN_2,
+        gpio3: PIN_3,
+        gpio4: PIN_4,
+        gpio5: PIN_5,
+
+        aux0: PIN_24,
+        aux1: PIN_25,
+        aux2: PIN_26,
+        aux3: PIN_27,
+
+        pwm_slice0: PWM_SLICE0,
+        pwm_slice1: PWM_SLICE1,
+        pwm_slice2: PWM_SLICE2,
+        pwm_slice4: PWM_SLICE4,
+        pwm_slice5: PWM_SLICE5,
     }
 }
 
@@ -137,7 +155,7 @@ async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDeco
 }
 
 #[embassy_executor::task]
-async fn packet_handler(mut handler: Packethandler) {
+async fn packet_handler(mut handler: Packethandler, mut fg_handler: FunctionGroupHandler) {
     trace!("starting packet handler loop");
 
     let mut receiver = unwrap!(PACKET_CHANNEL.subscriber());
@@ -170,9 +188,12 @@ async fn packet_handler(mut handler: Packethandler) {
                         if last_command != Some(op) {
                             // only send the velocity command if something changed. This prevents
                             // unnecessary work from being performed downstream
-                            MOTOR_CHANNEL.send(Command::SetVelocity128(sp)).await
+                            MOTOR_CHANNEL.send(Command::SetVelocity128(sp)).await;
+
+                            fg_handler.set_direction(sp.direction);
                         }
                     }
+                    Op::SetFunctions(fg) => fg_handler.handle(fg),
                 }
                 last_command = Some(op);
             }
@@ -250,12 +271,7 @@ async fn main(spawner: Spawner) {
 
         debug!("motor::Config={:?}", config);
 
-        RpMotorController::new(
-            config,
-            r.motor,
-            adc,
-            r.motor_dma.dma,
-        )
+        RpMotorController::new(config, r.motor, adc, r.motor_dma.dma)
     };
 
     let adc_offset = match cv_store.emf_adc_offset() {
@@ -336,6 +352,7 @@ async fn main(spawner: Spawner) {
     };
 
     let pid_sample_time = cv_store.pid_sample_time();
+    let fg_handler = functions::handler::new_handler(&cv_store, r.function_group);
 
     let ph = Handler::new(InstantTimer::new(), cv_store);
 
@@ -354,7 +371,7 @@ async fn main(spawner: Spawner) {
     // );
 
     spawner.must_spawn(packet_decoder(/*watchdog,*/ decoder));
-    spawner.must_spawn(packet_handler(ph));
+    spawner.must_spawn(packet_handler(ph, fg_handler));
     motor::handler::spawn(
         spawner,
         pid_sample_time

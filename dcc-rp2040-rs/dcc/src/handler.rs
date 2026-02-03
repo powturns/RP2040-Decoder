@@ -5,7 +5,7 @@ use crate::transport::packet::{
     AdvancedOperationsInstruction, Error as PacketError, OperationModeInstruction, Packet,
     ServiceInstructionType, ServicePacket,
 };
-use crate::{Timer, is_recipient};
+use crate::{FunctionGroupFlags, Timer, is_recipient, FunctionGroup, is_broadcast};
 use motor::VelocitySetpoint;
 
 const SERVICE_MODE_TIMEOUT: usize = 20;
@@ -22,6 +22,9 @@ pub enum Op {
 
     /// A 128 speed step velocity setpoint.
     Velocity128(VelocitySetpoint),
+
+    /// Request to set a function group state.
+    SetFunctions(FunctionGroup),
 }
 
 /// Contains the logic for handling packets.
@@ -30,7 +33,7 @@ where
     T: Timer,
     S: Store,
 {
-    timer: T,
+    enter_service_mode_timer: T,
     store: S,
 }
 
@@ -40,26 +43,29 @@ where
     S: Store,
 {
     pub fn new(timer: T, store: S) -> Self {
-        Self { timer, store }
+        Self { enter_service_mode_timer: timer, store }
     }
 
     /// Handles the packet, returning any operation that needs to be performed.
     pub fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         if packet.is_reset() {
             // we may be entering service mode
-            self.timer.start();
+            self.enter_service_mode_timer.start();
             self.handle_reset(packet).map(Some)
-        } else if let Some(elapsed) = self.timer.elapsed()
+        } else if let Some(elapsed) = self.enter_service_mode_timer.elapsed()
             && elapsed < SERVICE_MODE_TIMEOUT
             && packet.service_mode_candidate()
         {
-            self.timer.start();
+            self.enter_service_mode_timer.start();
 
             self.handle_service_mode(packet)
         } else if is_recipient(packet, &self.store) {
             // this packet was specifically addressed to us (not a broadcast)
-            self.timer.stop();
+            self.enter_service_mode_timer.stop();
 
+            self.handle_command(packet)
+        } else if (is_broadcast(packet)) {
+            // TODO: should we handle packets that are broadcast?
             self.handle_command(packet)
         } else {
             // packet not addressed to us
@@ -72,11 +78,8 @@ where
             OperationModeInstruction::AdvancedOperations(o) => match o {
                 AdvancedOperationsInstruction::SpeedStepControl(v) => Ok(Some(Op::Velocity128(v))),
             },
-            OperationModeInstruction::FunctionGroupOne(_) => {
-                todo!()
-            }
-            OperationModeInstruction::FunctionGroupTwo(_) => {
-                todo!()
+            OperationModeInstruction::FunctionGroup(fg) => {
+                Ok(Some(Op::SetFunctions(fg)))
             }
         }
     }
@@ -292,11 +295,11 @@ mod tests {
         }
 
         fn set_timer_elapsed(&mut self, elapsed: usize) {
-            self.handler.timer.set_elapsed(elapsed);
+            self.handler.enter_service_mode_timer.set_elapsed(elapsed);
         }
 
         fn start_timer(&mut self) {
-            self.handler.timer.start();
+            self.handler.enter_service_mode_timer.start();
         }
 
         fn enter_service_mode(&mut self) {
@@ -315,7 +318,7 @@ mod tests {
         let result = harness.handle(&reset_packet());
 
         assert_eq!(result, Ok(Some(Reset)));
-        assert!(harness.handler.timer.running);
+        assert!(harness.handler.enter_service_mode_timer.running);
     }
 
     #[test]

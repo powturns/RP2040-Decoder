@@ -116,6 +116,9 @@ pub(crate) enum Cv {
 
     /// How frequently the control is updated from the control table (in ms)
     SpeedStepPeriod = 175,
+
+    /// Start of the GPIO PWM enable mask (CV_112..CV_115).
+    EnablePwmOutputMask = 112,
 }
 
 const DEFAULT_VALUES: [u8; CV_SIZE] = [

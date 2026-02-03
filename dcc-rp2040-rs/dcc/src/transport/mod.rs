@@ -65,8 +65,8 @@ mod tests {
     #[cfg(test)]
     extern crate std;
 
-    use heapless::Vec;
     use super::*;
+    use heapless::Vec;
 
     /// Helper function to create a Packet directly from raw bytes
     fn create_packet(bytes: &[u8]) -> Packet {

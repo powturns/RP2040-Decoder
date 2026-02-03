@@ -1,7 +1,5 @@
-use crate::read_extended_address;
 use crate::transport::{is_basic_address, is_mf_extended_address};
-use core::marker::PhantomData;
-use core::ops::{Index, Range};
+use crate::{FunctionGroupFlags, read_extended_address, FunctionGroup};
 use heapless::Vec;
 use int_enum::IntEnum;
 use motor::{Direction, SpeedStep, VelocitySetpoint};
@@ -104,6 +102,8 @@ pub enum OperationInstructionType {
     SpeedDirectionForward = 0b011,
     FunctionGroup1 = 0b100,
     FunctionGroup2 = 0b101,
+    // Reserved = 0b110, // FeatureExpansion
+    // Reserved = 0b111, // CVAccess
     FeatureExpansion = 0b110,
     CVAccess = 0b111,
 }
@@ -113,8 +113,7 @@ pub enum OperationInstructionType {
 #[cfg_attr(test, derive(Debug))]
 pub enum OperationModeInstruction {
     AdvancedOperations(AdvancedOperationsInstruction),
-    FunctionGroupOne(FunctionGroupInstruction<FgiOne>),
-    FunctionGroupTwo(FunctionGroupInstruction<FgiTwo>),
+    FunctionGroup(FunctionGroup),
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -124,144 +123,6 @@ pub enum AdvancedOperationsInstruction {
     SpeedStepControl(VelocitySetpoint),
 }
 
-#[derive(Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(test, derive(Debug))]
-pub struct FunctionGroupInstruction<T> {
-    instruction: u8,
-    phantom_data: PhantomData<T>,
-}
-
-impl<T> FunctionGroupInstruction<T> {
-    pub fn new(instruction: u8) -> Self {
-        Self {
-            instruction,
-            phantom_data: PhantomData,
-        }
-    }
-}
-
-#[derive(Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(test, derive(Debug))]
-pub struct FgiOne;
-
-#[derive(Eq, PartialEq, Copy, Clone)]
-#[cfg_attr(feature = "defmt", derive(defmt::Format))]
-#[cfg_attr(test, derive(Debug))]
-pub struct FgiTwo;
-
-trait FunctionGroupInstructionRange: Index<u8> {
-    fn range(&self) -> Range<u8>;
-}
-
-impl FunctionGroupInstructionRange for FunctionGroupInstruction<FgiOne> {
-    fn range(&self) -> Range<u8> {
-        0..5
-    }
-}
-
-impl Index<u8> for FunctionGroupInstruction<FgiOne> {
-    type Output = bool;
-
-    fn index(&self, index: u8) -> &Self::Output {
-        // Bits 0-3 control F1-F4, bit 4 controls FL
-        match index {
-            0..=4 => {
-                if (self.instruction & (1 << index)) != 0 {
-                    &true
-                } else {
-                    &false
-                }
-            }
-            _ => panic!("Index out of bounds: valid indices are 0-4 (F1-F4 and FL)"),
-        }
-    }
-}
-
-impl<'a, T, O: Sized + Copy> IntoIterator for &'a FunctionGroupInstruction<T>
-where
-    FunctionGroupInstruction<T>: FunctionGroupInstructionRange<Output = O>,
-{
-    type Item = (u8, O);
-    type IntoIter = FunctionGroupInstructionIterator<'a, FunctionGroupInstruction<T>>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        let range = self.range();
-        FunctionGroupInstructionIterator {
-            index: range.start,
-            range,
-            instruction: &self,
-        }
-    }
-}
-
-pub struct FunctionGroupInstructionIterator<'a, I> {
-    index: u8,
-    range: Range<u8>,
-    instruction: &'a I,
-}
-
-impl<'a, T: Index<u8, Output = O>, O: Sized + Copy> Iterator
-    for FunctionGroupInstructionIterator<'a, T>
-{
-    type Item = (u8, T::Output);
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.range.contains(&self.index) {
-            let result = Some((self.index, self.instruction[self.index]));
-            self.index += 1;
-
-            result
-        } else {
-            None
-        }
-    }
-}
-
-impl FunctionGroupInstructionRange for FunctionGroupInstruction<FgiTwo> {
-    fn range(&self) -> Range<u8> {
-        // Bit 4 (S) determines which group:
-        // S=1: F5-F8 (range 5..9)
-        // S=0: F9-F12 (range 9..13)
-        let s_bit = (self.instruction >> 4) & 1;
-        if s_bit == 1 { 5..9 } else { 9..13 }
-    }
-}
-
-impl Index<u8> for FunctionGroupInstruction<FgiTwo> {
-    type Output = bool;
-
-    fn index(&self, index: u8) -> &Self::Output {
-        // Bit 4 (S) determines which group: 1 = F5-F8, 0 = F9-F12
-        // Bits 0-3 (DDDD) contain the function states
-        let s_bit = (self.instruction >> 4) & 1;
-
-        // Determine valid range based on S bit
-        let valid_range = if s_bit == 1 { 5..9 } else { 9..13 };
-
-        if !valid_range.contains(&index) {
-            panic!(
-                "Index out of bounds: valid indices for this instruction are {:?}",
-                valid_range
-            );
-        }
-
-        // Calculate bit position (0-3) based on the function number
-        let bit_position = if s_bit == 1 {
-            index - 5 // F5-F8 map to bits 0-3
-        } else {
-            index - 9 // F9-F12 map to bits 0-3
-        };
-
-        // Extract the bit state
-        if (self.instruction & (1 << bit_position)) != 0 {
-            &true
-        } else {
-            &false
-        }
-    }
-}
 impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
     type Error = Error;
 
@@ -307,19 +168,81 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
             OperationInstructionType::SpeedDirectionReverse => Err(Error::InvalidInstruction),
             OperationInstructionType::SpeedDirectionForward => Err(Error::InvalidInstruction),
             OperationInstructionType::FunctionGroup1 => {
-                Ok(OperationModeInstruction::FunctionGroupOne(
-                    FunctionGroupInstruction::<FgiOne>::new(first),
-                ))
+                Ok(OperationModeInstruction::FunctionGroup(parse_fg1(first)))
             }
             OperationInstructionType::FunctionGroup2 => {
-                Ok(OperationModeInstruction::FunctionGroupTwo(
-                    FunctionGroupInstruction::<FgiTwo>::new(first),
-                ))
+                Ok(OperationModeInstruction::FunctionGroup(parse_fg2(first)))
             }
             OperationInstructionType::FeatureExpansion => Err(Error::InvalidInstruction),
             OperationInstructionType::CVAccess => Err(Error::InvalidInstruction),
         }
     }
+}
+
+fn parse_fg1(instruction: u8) -> FunctionGroup {
+    let mut flags = FunctionGroupFlags::empty();
+
+    // Group 1: 100 D D D D D (FL F4 F3 F2 F1)
+    // Bits 0-3 control F1-F4, bit 4 controls FL
+    if (instruction & (1 << 0)) != 0 {
+        flags |= FunctionGroupFlags::F1;
+    }
+    if (instruction & (1 << 1)) != 0 {
+        flags |= FunctionGroupFlags::F2;
+    }
+    if (instruction & (1 << 2)) != 0 {
+        flags |= FunctionGroupFlags::F3;
+    }
+    if (instruction & (1 << 3)) != 0 {
+        flags |= FunctionGroupFlags::F4;
+    }
+    if (instruction & (1 << 4)) != 0 {
+        flags |= FunctionGroupFlags::FL;
+    }
+    FunctionGroup::new(FunctionGroupFlags::FG_1, flags)
+}
+
+fn parse_fg2(instruction: u8) -> FunctionGroup {
+    let mut flags = FunctionGroupFlags::empty();
+
+    // Group 2: 101 S D D D D
+    // Bit 4 (S) determines which group: 1 = F5-F8, 0 = F9-F12
+    // Bits 0-3 (DDDD) contain the function states
+    let s_bit = (instruction >> 4) & 1;
+
+    let group_mask = if s_bit == 1 {
+        // F5-F8 (bits 0-3 map to F5-F8)
+        if (instruction & (1 << 0)) != 0 {
+            flags |= FunctionGroupFlags::F5;
+        }
+        if (instruction & (1 << 1)) != 0 {
+            flags |= FunctionGroupFlags::F6;
+        }
+        if (instruction & (1 << 2)) != 0 {
+            flags |= FunctionGroupFlags::F7;
+        }
+        if (instruction & (1 << 3)) != 0 {
+            flags |= FunctionGroupFlags::F8;
+        }
+        FunctionGroupFlags::FG_2_1
+    } else {
+        // F9-F12 (bits 0-3 map to F9-F12)
+        if (instruction & (1 << 0)) != 0 {
+            flags |= FunctionGroupFlags::F9;
+        }
+        if (instruction & (1 << 1)) != 0 {
+            flags |= FunctionGroupFlags::F10;
+        }
+        if (instruction & (1 << 2)) != 0 {
+            flags |= FunctionGroupFlags::F11;
+        }
+        if (instruction & (1 << 3)) != 0 {
+            flags |= FunctionGroupFlags::F12;
+        }
+        FunctionGroupFlags::FG_2_0
+    };
+
+    FunctionGroup::new(group_mask, flags)
 }
 
 #[repr(u8)]
@@ -388,24 +311,22 @@ mod tests {
 
         let op_instr = OperationModeInstruction::try_from(&p).unwrap();
 
-        if let OperationModeInstruction::FunctionGroupOne(fgi) = op_instr {
-            // Test indexing
-            assert_eq!(fgi[0], true, "F1 should be true");
-            assert_eq!(fgi[1], true, "F2 should be true");
-            assert_eq!(fgi[2], false, "F3 should be false");
-            assert_eq!(fgi[3], false, "F4 should be false");
-            assert_eq!(fgi[4], true, "FL should be true");
+        if let OperationModeInstruction::FunctionGroup(fg) = op_instr {
+            // Test that the correct flags are set
+            assert!(fg.flags.contains(FunctionGroupFlags::F1), "F1 should be set");
+            assert!(fg.flags.contains(FunctionGroupFlags::F2), "F2 should be set");
+            assert!(!fg.flags.contains(FunctionGroupFlags::F3), "F3 should not be set");
+            assert!(!fg.flags.contains(FunctionGroupFlags::F4), "F4 should not be set");
+            assert!(fg.flags.contains(FunctionGroupFlags::FL), "FL should be set");
 
-            // Test iteration
-            let mut iter = fgi.into_iter();
-            assert_eq!(iter.next(), Some((0, true)));
-            assert_eq!(iter.next(), Some((1, true)));
-            assert_eq!(iter.next(), Some((2, false)));
-            assert_eq!(iter.next(), Some((3, false)));
-            assert_eq!(iter.next(), Some((4, true)));
-            assert_eq!(iter.next(), None);
+            // Test the group mask is correct
+            assert_eq!(fg.group_mask, FunctionGroupFlags::FG_1);
+
+            // Test the exact flag combination
+            let expected_flags = FunctionGroupFlags::F1 | FunctionGroupFlags::F2 | FunctionGroupFlags::FL;
+            assert_eq!(fg.flags, expected_flags);
         } else {
-            panic!("Expected FunctionGroupOne");
+            panic!("Expected FunctionGroup");
         }
     }
 
@@ -422,22 +343,21 @@ mod tests {
 
         let op_instr = OperationModeInstruction::try_from(&p).unwrap();
 
-        if let OperationModeInstruction::FunctionGroupTwo(fgi) = op_instr {
-            // Test indexing
-            assert_eq!(fgi[5], true, "F5 should be true");
-            assert_eq!(fgi[6], false, "F6 should be false");
-            assert_eq!(fgi[7], true, "F7 should be true");
-            assert_eq!(fgi[8], false, "F8 should be false");
+        if let OperationModeInstruction::FunctionGroup(fg) = op_instr {
+            // Test that the correct flags are set
+            assert!(fg.flags.contains(FunctionGroupFlags::F5), "F5 should be set");
+            assert!(!fg.flags.contains(FunctionGroupFlags::F6), "F6 should not be set");
+            assert!(fg.flags.contains(FunctionGroupFlags::F7), "F7 should be set");
+            assert!(!fg.flags.contains(FunctionGroupFlags::F8), "F8 should not be set");
 
-            // Test iteration
-            let mut iter = fgi.into_iter();
-            assert_eq!(iter.next(), Some((5, true)));
-            assert_eq!(iter.next(), Some((6, false)));
-            assert_eq!(iter.next(), Some((7, true)));
-            assert_eq!(iter.next(), Some((8, false)));
-            assert_eq!(iter.next(), None);
+            // Test the group mask is correct
+            assert_eq!(fg.group_mask, FunctionGroupFlags::FG_2_1);
+
+            // Test the exact flag combination
+            let expected_flags = FunctionGroupFlags::F5 | FunctionGroupFlags::F7;
+            assert_eq!(fg.flags, expected_flags);
         } else {
-            panic!("Expected FunctionGroupTwo");
+            panic!("Expected FunctionGroup");
         }
     }
 
@@ -454,22 +374,21 @@ mod tests {
 
         let op_instr = OperationModeInstruction::try_from(&p).unwrap();
 
-        if let OperationModeInstruction::FunctionGroupTwo(fgi) = op_instr {
-            // Test indexing
-            assert_eq!(fgi[9], false, "F9 should be false");
-            assert_eq!(fgi[10], false, "F10 should be false");
-            assert_eq!(fgi[11], true, "F11 should be true");
-            assert_eq!(fgi[12], true, "F12 should be true");
+        if let OperationModeInstruction::FunctionGroup(fg) = op_instr {
+            // Test that the correct flags are set
+            assert!(!fg.flags.contains(FunctionGroupFlags::F9), "F9 should not be set");
+            assert!(!fg.flags.contains(FunctionGroupFlags::F10), "F10 should not be set");
+            assert!(fg.flags.contains(FunctionGroupFlags::F11), "F11 should be set");
+            assert!(fg.flags.contains(FunctionGroupFlags::F12), "F12 should be set");
 
-            // Test iteration
-            let mut iter = fgi.into_iter();
-            assert_eq!(iter.next(), Some((9, false)));
-            assert_eq!(iter.next(), Some((10, false)));
-            assert_eq!(iter.next(), Some((11, true)));
-            assert_eq!(iter.next(), Some((12, true)));
-            assert_eq!(iter.next(), None);
+            // Test the group mask is correct
+            assert_eq!(fg.group_mask, FunctionGroupFlags::FG_2_0);
+
+            // Test the exact flag combination
+            let expected_flags = FunctionGroupFlags::F11 | FunctionGroupFlags::F12;
+            assert_eq!(fg.flags, expected_flags);
         } else {
-            panic!("Expected FunctionGroupTwo");
+            panic!("Expected FunctionGroup");
         }
     }
 

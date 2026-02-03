@@ -1,4 +1,4 @@
-use embassy_time::{Delay, Duration, Instant, Timer};
+use embassy_time::{Duration, Instant, Timer};
 
 // Can't use Instant::MAX due to https://github.com/embassy-rs/embassy/issues/5017
 pub const INSTANT_MAX_FIXED: Instant = Instant::from_ticks(u64::MAX - 1);
