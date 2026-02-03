@@ -160,7 +160,6 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
         debug!("offset_avg_fwd={}", offset_avg_fwd);
 
-
         Ok(((offset_avg_fwd as u32 + offset_avg_rev as u32) / 2) as u16)
     }
     /// Acknowledge a CV rd/wr instruction by pulsing the motor in both directions

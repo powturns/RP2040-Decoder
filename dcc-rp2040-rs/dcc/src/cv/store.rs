@@ -2,6 +2,14 @@ use crate::cv::Cv::*;
 use crate::cv::DEFAULT_VALUES;
 use crate::read_extended_address;
 use core::time::Duration;
+use motor::Direction;
+
+// Output configuration CV ranges.
+const FUNCTION_MAP_BASE: usize = 257; // CV_257 is F0 forward byte 3
+const FUNCTION_MAP_STRIDE: usize = 8; // 4 bytes forward + 4 bytes reverse
+const FUNCTION_MAP_DIR_OFFSET: usize = 4; // reverse starts after forward 4 bytes
+const PWM_SLICE_CONFIG_BASE: usize = 116; // CV_116..CV_122 for slice 0
+const PWM_SLICE_CONFIG_STRIDE: usize = 7; // wrap(2) + divider(1) + levels(4)
 
 #[derive(Copy, Clone, PartialEq, Eq)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -24,6 +32,13 @@ impl core::fmt::Display for Error {
             }
         }
     }
+}
+
+pub struct PwmConfig {
+    pub wrap: u16,
+    pub divider: u8,
+    pub a_level: u16,
+    pub b_level: u16,
 }
 
 /// A configuration variable store.
@@ -128,6 +143,20 @@ pub trait StoreExt {
     fn motor_pwm_divider(&self) -> u8;
 
     fn speed_step_period(&self) -> Duration;
+
+    /// Returns the GPIO PWM enable mask derived from CV_112..CV_115.
+    fn pwm_enabled_mask(&self) -> u32;
+
+    /// Returns the GPIO output mask for a function index and direction.
+    ///
+    /// The returned value is a mask representing ALL GPIO pins. Bits that are `1` in the mask
+    /// should be enabled when the function is active.
+    fn function_output_mask(&self, function_index: u8, direction: Direction) -> Option<u32>;
+
+    /// Returns the PWM configuration for the requested slice.
+    ///
+    /// Returns None if the slice is invalid.
+    fn pwm_configuration(&self, slice: u8) -> Option<PwmConfig>;
 }
 
 impl<T: Store> StoreExt for T {
@@ -236,6 +265,38 @@ impl<T: Store> StoreExt for T {
     fn speed_step_period(&self) -> Duration {
         Duration::from_millis(self.read_byte(SpeedStepPeriod as usize) as u64)
     }
+
+    fn pwm_enabled_mask(&self) -> u32 {
+        self.read_cv::<u32>(EnablePwmOutputMask as usize)
+    }
+
+    fn function_output_mask(&self, function_index: u8, direction: Direction) -> Option<u32> {
+        if function_index >= 32 {
+            return None;
+        }
+
+        let dir_offset = match direction {
+            Direction::Forward => 0,
+            Direction::Reverse => FUNCTION_MAP_DIR_OFFSET,
+        };
+        let cv_start = FUNCTION_MAP_BASE + (function_index as usize * FUNCTION_MAP_STRIDE) + dir_offset;
+        Some(self.read_cv::<u32>(cv_start))
+    }
+
+    fn pwm_configuration(&self, slice: u8) -> Option<PwmConfig> {
+        if slice >= 8 {
+            return None;
+        }
+
+        let base = PWM_SLICE_CONFIG_BASE + (slice as usize * PWM_SLICE_CONFIG_STRIDE);
+
+        Some(PwmConfig {
+            wrap: self.read_cv::<u16>(base),
+            divider: self.read_byte(base + 2).saturating_add(1),
+            a_level: self.read_cv::<u16>(base + 3),
+            b_level: self.read_cv::<u16>(base + 5),
+        })
+    }
 }
 
 pub fn ensure_populated(store: &mut impl Store) -> Result<(), Error> {
@@ -260,7 +321,7 @@ mod tests {
     #[cfg(test)]
     extern crate std;
     use super::*;
-    use crate::cv::{Cv, CV_SIZE};
+    use crate::cv::{CV_SIZE, Cv};
     use crate::testing::MockStore;
 
     #[test]
