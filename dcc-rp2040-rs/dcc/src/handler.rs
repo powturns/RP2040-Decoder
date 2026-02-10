@@ -64,7 +64,7 @@ where
             self.enter_service_mode_timer.stop();
 
             self.handle_command(packet)
-        } else if (is_broadcast(packet)) {
+        } else if is_broadcast(packet) {
             // TODO: should we handle packets that are broadcast?
             self.handle_command(packet)
         } else {
@@ -85,7 +85,9 @@ where
     }
 
     fn handle_service_mode(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        match packet.instruction_type()? {
+        let packet_type = packet.instruction_type()?;
+        trace!("Handling service mode packet: {:?}", packet_type);
+        match packet_type {
             ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet),
             ServiceInstructionType::VerifyByte => self.verify_byte(packet),
             ServiceInstructionType::WriteByte => self.write_byte(packet),
@@ -98,7 +100,7 @@ where
 
     fn verify_byte(&self, packet: &Packet) -> Result<Option<Op>, Error> {
         let expected = packet.cv_data()?;
-        let actual = self.store.read_byte(packet.cv_address()? as usize);
+        let actual = self.store.read_byte(packet.cv_address()? as usize)?;
 
         let op = if expected == actual {
             Some(Op::AcknowledgeCv)
@@ -137,7 +139,7 @@ where
         let bit_pos = packed & 0b0000_0111; // BBB
 
         let cv_addr = packet.cv_address()? as usize;
-        let current = self.store.read_byte(cv_addr);
+        let current = self.store.read_byte(cv_addr)?;
         let mask = 1u8 << bit_pos;
 
         if is_write {
@@ -185,7 +187,6 @@ mod tests {
     use crate::cv::Cv::{DecoderConfiguration, ExtendedAddressMsb, PrimaryAddress};
     use crate::handler::Op::Reset;
     use crate::testing::{MockStore, MockTimer, pkt};
-    use heapless::Vec;
     use motor::{Direction, SpeedStep};
 
     fn reset_packet() -> Packet {
@@ -308,7 +309,7 @@ mod tests {
         }
 
         fn read_cv(&self, addr: usize) -> u8 {
-            self.handler.store.read_byte(addr)
+            self.handler.store.read_byte(addr).expect("error reading cv")
         }
     }
 

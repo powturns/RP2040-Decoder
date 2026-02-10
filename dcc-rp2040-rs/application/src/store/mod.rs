@@ -38,7 +38,7 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, FLASH_SIZE> {
         let from = self.cv_data_range.start;
         let to = self.cv_data_range.end;
 
-        debug!("erasing flash from {} to {}", from, to);
+        trace!("erasing flash from {} to {}", from, to);
 
         self.flash.blocking_erase(from, to).map_err(|e| {
             error!("error erasing flash: {:?}", e);
@@ -97,24 +97,35 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, FLASH_SIZE> {
 }
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Store for Flash<'d, T, FLASH_SIZE> {
-    fn read_byte(&self, address: usize) -> u8 {
-        self.cache[address - 1]
+    fn read_byte(&self, address: usize) -> Result<u8, Error> {
+        self.cache.get(address - 1).map(|&byte| byte).ok_or(Error::InvalidAddress)
     }
 
-    fn read_bytes(&self, start: usize, len: usize) -> &[u8] {
+    fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
         let start_idx = start - 1;
         let end_idx = start_idx + len;
-        self.cache[start_idx..end_idx].as_ref()
+        self.cache.get(start_idx..end_idx).ok_or(Error::InvalidAddress)
     }
 
     fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error> {
-        self.cache[address - 1] = value;
-        self.write_bytes(address, &[value])
+        self.write_bytes(address, &[value], false)
     }
 
-    fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
-        let start_idx = start - 1;
-        self.cache[start_idx..start_idx + value.len()].copy_from_slice(value);
+    fn write_bytes(&mut self, address: usize, value: &[u8], force: bool) -> Result<(), Error> {
+        if address == 0 || address + value.len() - 1 > self.cache.len() {
+            return Err(Error::InvalidAddress);
+        }
+        let start_idx = address - 1;
+        let range = start_idx..start_idx + value.len();
+
+        if !force && &self.cache[range.clone()] == value {
+            return Ok(());
+        }
+
+        trace!("writing cv address {}: value={:?}", address, value);
+
+
+        self.cache[range].copy_from_slice(value);
         self.sync_cvs()
     }
 }
