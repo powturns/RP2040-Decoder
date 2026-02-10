@@ -256,7 +256,7 @@ async fn main(spawner: Spawner) {
         info!("decoder addr = {}", cv_store.addr());
     }
 
-    let motor_pwm_frequency = cv_store.motor_pwm_frequency();
+    let motor_pwm_frequency = unwrap!(cv_store.motor_pwm_frequency());
     debug!("motor_pwm_frequency={}", motor_pwm_frequency);
     let output_max = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency) as u16;
 
@@ -265,8 +265,8 @@ async fn main(spawner: Spawner) {
 
         let config = motor::Config {
             pwm_max_output: output_max,
-            pwm_clk_divider: fixed::FixedU16::from_num(cv_store.motor_pwm_divider() as u16),
-            emf_measurement_delay: unwrap!(cv_store.emf_measurement_delay().try_into()),
+            pwm_clk_divider: fixed::FixedU16::from_num(unwrap!(cv_store.motor_pwm_divider()) as u16),
+            emf_measurement_delay: unwrap!(unwrap!(cv_store.emf_measurement_delay()).try_into()),
         };
 
         debug!("motor::Config={:?}", config);
@@ -274,7 +274,7 @@ async fn main(spawner: Spawner) {
         RpMotorController::new(config, r.motor, adc, r.motor_dma.dma)
     };
 
-    let adc_offset = match cv_store.emf_adc_offset() {
+    let adc_offset = match unwrap!(cv_store.emf_adc_offset()) {
         Some(o) => o,
         None => {
             // calculate the offset, and store it in the store
@@ -303,9 +303,9 @@ async fn main(spawner: Spawner) {
     let speed_table = {
         use ::motor::speed::table;
         let config = table::Config {
-            v_start: cv_store.v_start(),
-            v_mid: cv_store.v_mid(),
-            v_high: cv_store.v_high(),
+            v_start: unwrap!(cv_store.v_start()),
+            v_mid: unwrap!(cv_store.v_mid()),
+            v_high: unwrap!(cv_store.v_high()),
         };
 
         debug!("table::Config={:?}", config);
@@ -316,20 +316,20 @@ async fn main(spawner: Spawner) {
     let speed_control = {
         let config = SpeedConfig::new(
             PidConfig {
-                sample_time: cv_store.pid_sample_time(),
-                filter_tc: cv_store.pid_filter_tc(),
-                ki: cv_store.pid_ki(),
-                kd: cv_store.pid_kd(),
+                sample_time: unwrap!(cv_store.pid_sample_time()),
+                filter_tc: unwrap!(cv_store.pid_filter_tc()),
+                ki: unwrap!(cv_store.pid_ki()),
+                kd: unwrap!(cv_store.pid_kd()),
                 output_max,
-                kp_gain_range1_end: cv_store.pid_kp_gain_range1_end(),
-                kp_y0: cv_store.pid_kp_y0(),
-                kp_y1: cv_store.pid_kp_y1(),
-                kp_y2: cv_store.pid_kp_y2(),
+                kp_gain_range1_end: unwrap!(cv_store.pid_kp_gain_range1_end()),
+                kp_y0: unwrap!(cv_store.pid_kp_y0()),
+                kp_y1: unwrap!(cv_store.pid_kp_y1()),
+                kp_y2: unwrap!(cv_store.pid_kp_y2()),
                 max_setpoint: *unwrap!(speed_table.last()) as f32,
             },
             StartupConfig {
                 output_max,
-                pid_ff: cv_store.pid_k_ff(),
+                pid_ff: unwrap!(cv_store.pid_k_ff()),
             },
             adc_offset as f32,
         );
@@ -341,9 +341,9 @@ async fn main(spawner: Spawner) {
 
     let accel_helper = {
         let config = accel::Config {
-            accel_rate: cv_store.acceleration_rate(),
-            decel_rate: cv_store.deceleration_rate(),
-            loop_delay: cv_store.speed_step_period(),
+            accel_rate: unwrap!(cv_store.acceleration_rate()),
+            decel_rate: unwrap!(cv_store.deceleration_rate()),
+            loop_delay: unwrap!(cv_store.speed_step_period()),
         };
 
         debug!("accel::Config={:?}", config);
@@ -351,7 +351,7 @@ async fn main(spawner: Spawner) {
         accel::Helper::new(config)
     };
 
-    let pid_sample_time = cv_store.pid_sample_time();
+    let pid_sample_time = unwrap!(cv_store.pid_sample_time());
     let fg_handler = functions::handler::new_handler(&cv_store, r.function_group);
 
     let ph = Handler::new(InstantTimer::new(), cv_store);

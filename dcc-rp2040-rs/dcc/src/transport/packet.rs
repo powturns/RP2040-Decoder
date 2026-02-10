@@ -272,7 +272,11 @@ impl ServicePacket for Packet {
 
         // Per NMRA DCC service mode (S-9.2.3), bits 4..3 of the first byte select the instruction.
         let code = (self.data[0] >> 3) & 0b11;
-        code.try_into().map_err(|_| Error::InvalidInstruction)
+        code.try_into().map_err(|_| {
+            trace!("invalid service mode instruction: code={:08b}", code);
+
+            Error::InvalidInstruction
+        })
     }
 
     fn cv_address(&self) -> Result<u16, Error> {

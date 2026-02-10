@@ -131,7 +131,7 @@ const DEFAULT_VALUES: [u8; CV_SIZE] = [
     /////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     0b01100100, //CV_5  -    V_max               -   Default = 100*16
     0b00111111, //CV_6  -    V_mid               -   Default = 63*16
-    0b00000010, //CV_7  -    Version no.                                                         (read-only)
+    0b10000001, //CV_7  -    Version no.                                                         (read-only)
     // Writing a value of 8 to CV_8 resets all CV values to the default values in CV.h
     0b00001101, //CV_8  -    Manufacturer (13 = Public Domain & Do-It-Yourself Decoders)         (read-only)
     0b10010110, //CV_9  -    PWM frequency in Hz = CV_9*100+10000    - Default = (150*100+10000)Hz = 25kHz
@@ -244,11 +244,11 @@ const DEFAULT_VALUES: [u8; CV_SIZE] = [
     0b00000000, //CV_104  -
     0b00000000, //CV_105  -
     0b00000000, //CV_106  -
-    0b00000000, //CV_107  -
-    0b00000000, //CV_108  -
-    0b00000000, //CV_109  -
-    0b00000000, //CV_110  -
-    0b00000000, //CV_111  -
+    0b00000001, //CV_107  - MSB Manufacturer ID for DIY https://www.decoderdb.com/database/decoderdb-list
+    0b00001011, //CV_108  - LSB Manufacturer ID
+    0b00000000, //CV_109  - MSB Extended firmware version
+    0b00000000, //CV_110  - LSB Extended firmware version
+    0b00000000, //CV_111  - Decoder Hardware ID
     ///// PWM - Configuration //////////////////////////////////////////////////////////////////////////////////////////////
     // This Config can cause conflicts when GPIOs controlled by the same slice are enabled at the same time.
     0b00000000, //CV_112  -  GPIO 24-31  enable PWM
