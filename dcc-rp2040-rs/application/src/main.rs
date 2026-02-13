@@ -133,24 +133,6 @@ async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDeco
         }
 
         PACKET_CHANNEL.publish_immediate(packet);
-
-        // let mut packet = packet;
-        // loop {
-        //     if let Err(TrySendError::Full(p)) = PACKET_CHANNEL.try_send(packet) {
-        //         // pop the oldest packet off the channel.
-        //         // Note there is a race here if the external consumer pulls the packet off the
-        //         // channel before we do, we'll unnecessarily pop a packet off.
-        //         if let Ok(dropped) = PACKET_CHANNEL.try_receive() {
-        //             info!("packet channel full, dropping packet {:?}", dropped);
-        //         }
-        //         packet = p;
-        //     } else {
-        //         break;
-        //     }
-        // }
-
-        // FIXME: come up with a better watchdog
-        // watchdog.feed();
     }
 }
 
@@ -194,6 +176,9 @@ async fn packet_handler(mut handler: Packethandler, mut fg_handler: FunctionGrou
                         }
                     }
                     Op::SetFunctions(fg) => fg_handler.handle(fg),
+                    Op::Reboot => {
+                        cortex_m::peripheral::SCB::sys_reset();
+                    }
                 }
                 last_command = Some(op);
             }

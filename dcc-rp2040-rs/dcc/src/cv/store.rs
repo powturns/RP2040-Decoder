@@ -146,6 +146,9 @@ pub trait StoreExt {
     fn motor_pwm_frequency(&self) -> Result<u32, Error>;
 
     fn emf_adc_offset(&self) -> Result<Option<u8>, Error>;
+
+    fn emf_adc_offset_clear(&mut self) -> Result<(), Error>;
+    
     fn write_emf_adc_offset(&mut self, offset: u8) -> Result<(), Error>;
 
     fn motor_pwm_divider(&self) -> Result<u8, Error>;
@@ -261,6 +264,10 @@ impl<T: Store> StoreExt for T {
         } else {
             Ok(None)
         }
+    }
+
+    fn emf_adc_offset_clear(&mut self) -> Result<(), Error> {
+        self.write_byte(EmfAdcOffset as usize, u8::MAX)
     }
 
     fn write_emf_adc_offset(&mut self, offset: u8) -> Result<(), Error> {

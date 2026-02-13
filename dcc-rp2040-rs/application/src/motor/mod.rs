@@ -44,6 +44,7 @@ pub struct RpMotorController<DMA: dma::Channel> {
     rev: DirectionControl,
     adc: Adc<'static, Async>,
     pub dma: Peri<'static, DMA>,
+    ack_dir: Direction,
 }
 
 impl<DMA: dma::Channel> RpMotorController<DMA> {
@@ -85,6 +86,7 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
             rev,
             adc,
             dma,
+            ack_dir: Direction::Forward,
         }
     }
 
@@ -166,14 +168,16 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
     async fn acknowledge_cv(&mut self) -> Result<(), Error> {
         self.stop()?;
 
-        // FIXME: we want to ack but we dont want to trip the programming track current
-        self.fwd.set_output_percent(50)?;
-        Timer::after_millis(3).await;
-        self.fwd.stop()?;
+        let (next_direction, ctrl)  = match self.ack_dir {
+            Direction::Forward => (Direction::Reverse, &mut self.fwd),
+            Direction::Reverse => (Direction::Forward, &mut self.rev),
+        };
+        self.ack_dir = next_direction;
 
-        self.rev.set_output_percent(50)?;
-        Timer::after_millis(3).await;
-        self.rev.stop()?;
+        // FIXME: we want to ack but we dont want to trip the programming track current
+        ctrl.set_output_percent(50)?;
+        Timer::after_millis(6).await;
+        ctrl.stop()?;
 
         Ok(())
     }
