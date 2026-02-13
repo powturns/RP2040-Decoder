@@ -1,12 +1,13 @@
-use crate::cv::store::Error as StoreError;
+use crate::cv::store::{reset, Error as StoreError, StoreExt};
 use crate::cv::store::Store;
-use crate::handler::Op::AcknowledgeCv;
+use crate::handler::Op::{AcknowledgeCv, Reboot};
 use crate::transport::packet::{
     AdvancedOperationsInstruction, Error as PacketError, OperationModeInstruction, Packet,
     ServiceInstructionType, ServicePacket,
 };
 use crate::{FunctionGroupFlags, Timer, is_recipient, FunctionGroup, is_broadcast};
 use motor::VelocitySetpoint;
+use crate::cv::Cv;
 
 const SERVICE_MODE_TIMEOUT: usize = 20;
 
@@ -17,7 +18,7 @@ pub enum Op {
     /// Acknowledge the CV has been written using the service mode technique.
     AcknowledgeCv,
 
-    /// Resets the decoder to the startup state.
+    /// Stops the decoder operations and returns it to the startup state.
     Reset,
 
     /// A 128 speed step velocity setpoint.
@@ -25,6 +26,9 @@ pub enum Op {
 
     /// Request to set a function group state.
     SetFunctions(FunctionGroup),
+
+    /// Reboots the decoder.
+    Reboot,
 }
 
 /// Contains the logic for handling packets.
@@ -86,7 +90,7 @@ where
 
     fn handle_service_mode(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         let packet_type = packet.instruction_type()?;
-        trace!("Handling service mode packet: {:?}", packet_type);
+        trace!("handle_service_mode: type={:?}, packet={:08b}", packet_type, packet.data);
         match packet_type {
             ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet),
             ServiceInstructionType::VerifyByte => self.verify_byte(packet),
@@ -114,8 +118,41 @@ where
     fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         // TODO: we dont allow writing every cv!, some are reserved for special operations!
 
-        self.store
-            .write_byte(packet.cv_address()? as usize, packet.cv_data()?)?;
+        let address = packet.cv_address()?;
+
+        let write = match Cv::try_from(address) {
+            Ok(addr) => match addr {
+
+                // read only cvs
+                Cv::ManufacturerId => {
+                    // Reset all CVs to default when setting CV_8 = 8)
+                    if packet.cv_data()? == 8 {
+                        info!("Resetting all CVs to default");
+                        reset(&mut self.store)?;
+                    }
+
+                    return Ok(Some(Reboot));
+                }
+
+                Cv::ManufacturerVersionNumber => {
+                    // ADC offset Adjustment is triggered when setting CV_7 = 7
+                    if packet.cv_data()? == 7 {
+                        self.store.emf_adc_offset_clear()?;
+                    }
+
+                    return Ok(Some(Reboot));
+                }
+
+                _ => true
+            }
+
+            _ => true
+        };
+
+        if write {
+            self.store
+                .write_byte(address as usize, packet.cv_data()?)?;
+        }
 
         Ok(Some(AcknowledgeCv))
     }

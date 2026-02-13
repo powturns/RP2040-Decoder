@@ -1,9 +1,12 @@
+use int_enum::IntEnum;
+
 pub mod store;
 
 /// The number of CV values.
 pub const CV_SIZE: usize = 1024;
 
 #[repr(u16)]
+#[derive(Eq, PartialEq, Copy, Clone, IntEnum)]
 pub(crate) enum Cv {
     /// The primary decoder address.
     ///
@@ -36,6 +39,17 @@ pub(crate) enum Cv {
     /// used to generate a performance curve in the decoder that translate speed step values into
     /// motor voltage drive levels and is specified as a fraction of available rectified supply voltage.
     VMid = 6,
+
+    /// This is reserved for the manufacturer to store information regarding the version of the decoder.
+    ///
+    /// Read only
+    ManufacturerVersionNumber = 7,
+
+    /// CV8 shall contain the NMRA assigned id number of the manufacturer of this decoder.
+    ///
+    /// Read only
+    ManufacturerId=8,
+
 
     /// PWM frequency in Hz = CV_9*100+10000
     MotorPwmFrequency = 9,
@@ -106,6 +120,9 @@ pub(crate) enum Cv {
 
     /// Number of largest samples to discard when calculating emf (outliers)
     EmfMsrHighCutoff = 64,
+
+    /// Provides additional higher voltage spike to overcome starting friction.
+    KickStart = 65,
 
     /// Offset applied to the ADC when calculating the back emf.
     /// 255 = offset not measured
