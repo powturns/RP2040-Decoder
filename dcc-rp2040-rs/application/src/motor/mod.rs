@@ -251,7 +251,7 @@ impl DirectionControl {
 
     fn set_output_percent(&mut self, percent: u8) -> Result<(), Error> {
         debug_assert!(percent <= 100);
-        Ok(self.motor_pwm.set_duty_cycle_percent(percent.max(100))?)
+        Ok(self.motor_pwm.set_duty_cycle_percent(percent.min(100))?)
     }
 
     fn stop(&mut self) -> Result<(), Error> {
