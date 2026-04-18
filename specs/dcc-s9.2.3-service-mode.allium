@@ -1,0 +1,507 @@
+-- allium: 3
+-- dcc-s9.2.3-service-mode.allium
+-- NMRA S-9.2.3: Service Mode Standards for Digital Command Control (July 2004)
+--
+-- Scope: Service mode (programming track) CV access semantics
+-- Includes:
+--   Decoder mode state machine (operations / service / limbo)
+--   Two-identical-packet write requirement
+--   CV byte verify and write
+--   CV bit verify and write
+--   Address-only write (CV1 with side-effects)
+--   Factory reset (write to CV8)
+--   Decoder Lock mechanism (Appendix B)
+--   Acknowledgment signalling (basic electrical)
+-- Excludes:
+--   Physical signal encoding (see S-9.1)
+--   Baseline packet formats (see S-9.2)
+--   Extended packet formats and long addresses (see RP-9.2.1)
+--   Advanced acknowledgment (see S-9.3.1, S-9.3.2)
+--   CV semantics and register model (see S-9.2.2)
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity CommandStation {
+    -- Initiates service mode by issuing Reset packets followed by
+    -- service mode instruction packets on the programming track.
+    -- Responsible for detecting decoder acknowledgment pulses.
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value PendingWriteOperation {
+    cv_number: Integer          -- 1–1023
+    data: Integer               -- 0–255 for byte operations
+    bit_position: Integer?      -- 0–7 for bit operations
+    is_bit_write: Boolean       -- true = bit operation; false = byte operation
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum DecoderMode { operations | service | limbo }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity Decoder {
+    address: Integer            -- current short address (CV1), 1–127
+    mode: DecoderMode
+
+    transitions mode {
+        operations -> service
+        service    -> limbo
+        limbo      -> operations
+        terminal:
+    }
+
+    -- Held while waiting for the confirming second identical packet
+    pending_operation: PendingWriteOperation?
+
+    -- Decoder Lock state (Appendix B). When locked, decoder ignores
+    -- service mode packets addressed to a different decoder.
+    service_locked: Boolean
+
+}
+
+entity ConfigurationVariable {
+    decoder: Decoder
+    number: Integer             -- 1–1023
+    value: Integer              -- 0–255
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- CV number ranges
+    min_cv_number: Integer = 1
+    max_cv_number: Integer = 1023
+    min_cv_value: Integer = 0
+    max_cv_value: Integer = 255
+
+    -- CV numbers with special semantics
+    cv_short_address: Integer = 1
+    cv_manufacturer_version: Integer = 7
+    cv_manufacturer_id: Integer = 8
+    cv_consist_address: Integer = 19
+    cv_decoder_config: Integer = 29    -- bit 5 = long address enable
+
+    -- Decoder Lock CV
+    cv_lock_id: Integer = 15
+    cv_lock_key: Integer = 16
+
+    -- Acknowledgment pulse requirements
+    -- NOTE: Allium Duration literals do not support sub-second granularity.
+    -- The standard requires a 60 mA positive delta for at least 6 ms (±1 ms).
+    -- These constraints are captured as open questions below.
+
+    -- Service mode address range (addresses 112–127 are reserved for SM).
+    -- A decoder in limbo returns to operations mode only when it receives
+    -- a valid packet whose address is NOT in this range.
+    service_mode_address_min: Integer = 112
+    service_mode_address_max: Integer = 127
+}
+
+------------------------------------------------------------
+-- Black Box Functions
+------------------------------------------------------------
+
+-- Returns true if the two pending operations are identical
+-- (same cv_number, data, bit_position, is_bit_write).
+function matches_pending_operation(a: PendingWriteOperation, b: PendingWriteOperation) -> Boolean
+
+-- Returns true if the given bit of value equals expected_bit.
+function bit_matches(value: Integer, bit_position: Integer, expected_bit: Integer) -> Boolean
+
+-- Returns value with the bit at bit_position set to 1.
+function set_bit(value: Integer, bit_position: Integer) -> Integer
+
+-- Returns value with the bit at bit_position cleared to 0.
+function clear_bit(value: Integer, bit_position: Integer) -> Integer
+
+-- Returns true if address is in the service-mode reserved range (112–127).
+function is_service_mode_address(address: Integer) -> Boolean
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ── Mode Entry ──────────────────────────────────────────
+
+-- A decoder enters service mode after receiving a Reset packet followed
+-- by a service mode instruction packet on the programming track.
+rule DecoderEntersServiceMode {
+    when: ServiceModePacketReceivedAfterReset(decoder, packet)
+
+    requires: decoder.mode = operations
+    requires: packet.is_valid
+
+    ensures: decoder.mode = service
+    ensures: decoder.pending_operation = null
+}
+
+-- ── Mode Exit ───────────────────────────────────────────
+
+-- A decoder exits service mode to limbo when it receives any valid packet
+-- that is not a service mode instruction, or when 20 ms elapse without a
+-- service mode instruction.
+-- NOTE: The 20 ms timeout cannot be expressed as a Duration literal in
+-- Allium v3; see open questions.
+rule DecoderExitsServiceModeOnNonSmPacket {
+    when: NonServiceModePacketReceived(decoder, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+
+    ensures: decoder.mode = limbo
+    ensures: decoder.pending_operation = null
+}
+
+-- A decoder in limbo returns to operations mode on the first valid packet
+-- whose address is not in the service-mode reserved range (112–127).
+rule DecoderReturnsToOperations {
+    when: PacketReceived(decoder, packet)
+
+    requires: decoder.mode = limbo
+    requires: packet.is_valid
+    requires: not is_service_mode_address(packet.address)
+
+    ensures: decoder.mode = operations
+}
+
+-- ── Two-Packet Write Latch ───────────────────────────────
+
+-- First service mode instruction: decoder records the pending operation
+-- but does not yet execute it.
+rule DecoderLatchesFirstWritePacket {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: decoder.pending_operation = null
+
+    ensures: decoder.pending_operation = operation
+}
+
+-- A different or invalid second packet clears the latch without executing.
+rule DecoderClearsPendingOnMismatch {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: decoder.pending_operation != null
+    requires: not matches_pending_operation(decoder.pending_operation, operation)
+
+    ensures: decoder.pending_operation = null
+
+    @guidance
+        -- The decoder has now seen two non-identical service mode packets.
+        -- The latch is cleared; it waits again for a fresh first packet.
+}
+
+-- ── CV Byte Verify ──────────────────────────────────────
+
+-- Decoder verifies a CV byte value and sends an acknowledgment if it matches.
+rule DecoderVerifiesCVByte {
+    when: ServiceModeVerifyPacketReceived(decoder, cv_number, expected_value, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: cv_number >= 1 and cv_number <= 1023
+
+    -- Decoder sends acknowledgment iff the CV value matches expected_value.
+    -- No state change occurs regardless of the outcome.
+    @guidance
+        -- Acknowledgment is a 60 mA positive current delta sustained for
+        -- at least 6 ms (see open question on Duration granularity).
+        -- The decoder does NOT modify the CV value during a verify operation.
+}
+
+-- ── CV Byte Write ───────────────────────────────────────
+
+-- Decoder writes a byte value to a CV after receiving two identical packets.
+rule DecoderWritesCVByte {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: not operation.is_bit_write
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+    requires: operation.cv_number >= 1 and operation.cv_number <= 1023
+    requires: operation.data >= 0 and operation.data <= 255
+
+    let cv = ConfigurationVariable where decoder = decoder and number = operation.cv_number
+
+    ensures: cv.value = operation.data
+    ensures: decoder.pending_operation = null
+
+    @guidance
+        -- Decoder sends acknowledgment after successful write.
+        -- The CV retains its new value across power cycles.
+}
+
+-- ── CV Bit Verify ───────────────────────────────────────
+
+-- Decoder verifies a single bit within a CV and sends acknowledgment if it matches.
+rule DecoderVerifiesCVBit {
+    when: ServiceModeBitVerifyPacketReceived(decoder, cv_number, bit_position, expected_bit, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: cv_number >= 1 and cv_number <= 1023
+    requires: bit_position >= 0 and bit_position <= 7
+    requires: expected_bit = 0 or expected_bit = 1
+
+    let cv = ConfigurationVariable where decoder = decoder and number = cv_number
+
+    -- Sends acknowledgment iff bit_matches(cv.value, bit_position, expected_bit).
+    @guidance
+        -- No state change occurs; acknowledgment signals a match only.
+}
+
+-- ── CV Bit Write ────────────────────────────────────────
+
+-- Decoder writes a single bit to a CV after receiving two identical bit-write packets.
+rule DecoderWritesCVBit {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: operation.is_bit_write
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+    requires: operation.cv_number >= 1 and operation.cv_number <= 1023
+    requires: operation.bit_position != null
+    requires: operation.bit_position >= 0 and operation.bit_position <= 7
+    requires: operation.data = 0 or operation.data = 1
+
+    let cv = ConfigurationVariable where decoder = decoder and number = operation.cv_number
+
+    ensures: cv.value =
+        operation.data = 1
+            ? set_bit(cv.value, operation.bit_position)
+            : clear_bit(cv.value, operation.bit_position)
+    ensures: decoder.pending_operation = null
+
+    @guidance
+        -- Decoder sends acknowledgment after successful bit write.
+}
+
+-- ── Address-Only Write ──────────────────────────────────
+
+-- Writing CV1 (short address) also clears the long-address enable bit (CV29 bit 5)
+-- and clears the consist address (CV19). This is the Address-Only Write mode.
+rule DecoderWritesAddressOnly {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: not operation.is_bit_write
+    requires: operation.cv_number = 1
+    requires: operation.data >= 1 and operation.data <= 127
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+
+    let cv1  = ConfigurationVariable where decoder = decoder and number = 1
+    let cv19 = ConfigurationVariable where decoder = decoder and number = 19
+    let cv29 = ConfigurationVariable where decoder = decoder and number = 29
+
+    ensures: cv1.value  = operation.data
+    ensures: decoder.address = operation.data
+    ensures: cv19.value = 0
+    ensures: cv29.value = clear_bit(cv29.value, 5)
+    ensures: decoder.pending_operation = null
+
+    @guidance
+        -- Clearing CV29 bit 5 disables long addressing; clearing CV19
+        -- deactivates any active consist. These are mandatory side effects
+        -- of the Address-Only Write, not optional.
+}
+
+-- ── Factory Reset ───────────────────────────────────────
+
+-- A write to CV8 triggers immediate restoration of all CVs to factory defaults.
+-- The standard does not prescribe which value triggers the reset; it specifies
+-- only that CV8 should hold 255 as a transient in-progress indicator visible
+-- to the command station while the restoration is ongoing. Fast implementations
+-- that complete the reset synchronously (within the same operation) satisfy this
+-- requirement without ever persistently writing CV8=255.
+rule DecoderResetsToFactoryDefaults {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: not operation.is_bit_write
+    requires: operation.cv_number = 8
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+
+    -- All CVs are restored to their manufacturer-defined factory defaults.
+    ensures: decoder.pending_operation = null
+
+    @guidance
+        -- CV7 (manufacturer version) and CV8 (manufacturer ID) are always
+        -- restored to their factory values. All other CV defaults are
+        -- manufacturer-defined.
+        -- NMRA specifies CV8=255 as an in-progress signal; an implementation
+        -- that completes the reset within the same operation satisfies this
+        -- without writing the intermediate value.
+}
+
+-- ── Decoder Lock (Appendix B) ───────────────────────────
+
+-- A decoder is locked when its CV15 value does not match CV16.
+-- While locked, it ignores service mode packets.
+-- The locked state persists across power cycles.
+rule DecoderIgnoresServiceModeWhenLocked {
+    when: ServiceModePacketReceived(decoder, packet)
+
+    requires: decoder.service_locked = true
+
+    -- Decoder takes no action; packet is discarded.
+    @guidance
+        -- Decoder Lock allows multiple decoders on the same programming
+        -- track to be selectively addressed by setting their CV16 values
+        -- to different IDs. Only the decoder whose CV15 matches CV16
+        -- responds to service mode instructions.
+}
+
+-- Decoder becomes unlocked when it receives a valid non-service-mode,
+-- non-lock packet. The lock state is cleared until re-engaged.
+rule DecoderUnlocksOnValidOpsPacket {
+    when: PacketReceived(decoder, packet)
+
+    requires: decoder.service_locked = true
+    requires: packet.is_valid
+    requires: not is_service_mode_address(packet.address)
+
+    ensures: decoder.service_locked = false
+}
+
+-- Writing a matching value to CV15 unlocks the decoder for service mode access.
+rule DecoderUnlocksViaCVWrite {
+    when: ServiceModeWritePacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: decoder.service_locked = false    -- can only write when already unlocked
+    requires: not operation.is_bit_write
+    requires: operation.cv_number = 15
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+
+    let cv15 = ConfigurationVariable where decoder = decoder and number = 15
+    let cv16 = ConfigurationVariable where decoder = decoder and number = 16
+
+    ensures: cv15.value = operation.data
+    -- Decoder is locked if cv15.value != cv16.value after the write.
+    ensures: decoder.service_locked = (operation.data != cv16.value)
+    ensures: decoder.pending_operation = null
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant CVNumberRange {
+    for cv in ConfigurationVariables:
+        cv.number >= 1 and cv.number <= 1023
+}
+
+invariant CVValueRange {
+    for cv in ConfigurationVariables:
+        cv.value >= 0 and cv.value <= 255
+}
+
+invariant ShortAddressRange {
+    for d in Decoders:
+        d.address >= 1 and d.address <= 127
+}
+
+invariant PendingOperationOnlyInServiceMode {
+    for d in Decoders:
+        d.pending_operation != null implies d.mode = service
+}
+
+invariant AddressMatchesCV1 {
+    for d in Decoders:
+        d.address = (ConfigurationVariable where decoder = d and number = 1).value
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor ProgrammingTrackResponder {
+    identified_by: Decoder where mode = service
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface ServiceModeControl {
+    facing station: CommandStation
+
+    @guarantee TwoPacketRequired
+        -- A decoder only executes a write or verify after receiving two
+        -- identical service mode instruction packets with no intervening
+        -- valid packets between them.
+
+    @guarantee AcknowledgmentOnSuccess
+        -- Decoder sends a current acknowledgment pulse (60 mA positive
+        -- delta for ≥6 ms) after a successful verify (value matched)
+        -- or after a successful write.
+
+    @guarantee LockPersistsAcrossPowerCycles
+        -- The decoder lock state (CV15 vs CV16 comparison) survives
+        -- power interruption and is re-evaluated on each power-on.
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract ServiceModeAcknowledgment {
+    acknowledge: (decoder: Decoder) -> Unit
+
+    @invariant AcknowledgmentPulse
+        -- The acknowledgment is a positive 60 mA current delta sustained
+        -- for at least 6 ms (±1 ms tolerance).
+        -- NOTE: Sub-second Duration not expressible in Allium v3 — see open questions.
+
+    @invariant NoAcknowledgmentOnMismatch
+        -- A verify that does not match, or a write that fails, produces
+        -- no acknowledgment pulse.
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred AdvancedAcknowledgment.signal   -- see: dcc-s9.3.1-advanced-acknowledgment.allium
+deferred BiDirectionalCommunication.ack  -- see: dcc-s9.3.2-bidirectional.allium
+deferred CVSemantics.defaults            -- see: dcc-s9.2.2-configuration-variables.allium
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Duration granularity: Allium v3 supports .seconds and above but not .milliseconds. The standard requires a 20 ms service mode timeout and a 6 ms (±1 ms) acknowledgment pulse. Should the language be extended with .milliseconds, or should these constraints be modelled as integer counts (e.g., ms: Integer = 20) with a unit annotation?"
+
+open question "Service mode timeout rule: the decoder exits service mode if 20 ms elapse without a new service mode instruction. This requires a temporal trigger (timer) that Allium does not yet express. Should a 'timeout' trigger variant be added to the language?"
+
+open question "Acknowledgment surface vs. rule: the 60 mA / 6 ms acknowledgment is partly electrical (below domain level) and partly a behavioural guarantee. Should it be modelled only as a contract invariant, or also as an explicit rule with an 'ensures: acknowledgment_sent' postcondition?"
+
+open question "Decoder Lock scope: Appendix B describes Decoder Lock as optional. Should service_locked and the lock rules be guarded by a decoder capability flag (e.g., supports_decoder_lock: Boolean), or is the lock mechanism mandatory for all decoders implementing this spec?"
+
+
+open question "Register Addressing mode (legacy): the standard describes a backward-compatible register model (CV1=R1, CV2=R2, etc.) alongside direct CV addressing. Should the register aliases be modelled as derived values pointing into the CV entity, or excluded as a legacy implementation detail?"

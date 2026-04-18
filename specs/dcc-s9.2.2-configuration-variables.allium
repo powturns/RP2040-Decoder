@@ -1,0 +1,595 @@
+-- allium: 3
+-- dcc-s9.2.2-configuration-variables.allium
+-- NMRA S-9.2.2: Configuration Variables for Digital Command Control (July 2012)
+--
+-- Scope: CV number registry and CV-to-decoder-state semantics
+-- Includes:
+--   CV map for multi-function decoders (Table 1)
+--   CV map for accessory decoders (Table 3)
+--   CV29 configuration flag semantics for both decoder types
+--   Consist configuration (CV19, CV21, CV22)
+--   Speed profile CVs (CV2, CV5, CV6, CV65-66, CV67-94, CV95)
+--   Motion characteristics (CV3, CV4, CV23, CV24, CV11)
+--   Dynamic (volatile) CVs (CV880-895)
+--   Indexed CV area pointers (CV31, CV32)
+-- Excludes:
+--   Service mode programming protocol (see S-9.2.3)
+--   Packet formats (see S-9.2, RP-9.2.1)
+--   Manufacturer ID registry (published separately as Appendix A)
+--   Bit-level encoding of CV values (implementation detail)
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity MultiFunctionDecoder {
+    -- Defined in dcc-s9.2.1-extended-packet-formats.allium.
+    -- Has: address, address_mode (short_7bit | long_14bit), consist_address,
+    -- consist_reversed, direction, speed, step, active_functions.
+}
+
+external entity AccessoryDecoder {
+    -- Defined in dcc-s9.2.1-extended-packet-formats.allium.
+    -- Has: address, kind (BasicAccessoryDecoder | ExtendedAccessoryDecoder).
+}
+
+external entity ConfigurationVariable {
+    -- Defined in dcc-s9.2.3-service-mode.allium.
+    -- Has: decoder, number (1-1023), value (0-255).
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value DecoderCapabilityFlags {
+    -- Semantic interpretation of CV29 for multi-function decoders.
+    direction_reversed: Boolean
+    fl_in_function_group_one: Boolean       -- false=speed/dir packet; true=function group 1
+    power_source_conversion_enabled: Boolean
+    bidirectional_comms_enabled: Boolean
+    uses_custom_speed_table: Boolean        -- false=CV2/5/6; true=CV67-94
+    long_address_enabled: Boolean
+}
+
+value AccessoryDecoderCapabilityFlags {
+    -- Semantic interpretation of CV29 (CV541) for accessory decoders.
+    bidirectional_comms_enabled: Boolean
+    is_extended_type: Boolean               -- false=basic; true=extended
+    uses_output_addressing: Boolean         -- false=decoder-address; true=output-address
+}
+
+value SpeedProfile {
+    vstart: Integer     -- motor drive level at step 1, as fraction of rectified supply
+    vmid: Integer       -- motor drive level at middle step (0 or 1 = disabled)
+    vhigh: Integer      -- motor drive level at max step (0 or 1 = disabled)
+    kick_start: Integer -- extra voltage pulse transitioning stop→step 1 (0 = disabled)
+    forward_trim: Integer  -- forward voltage scale factor n/128 (0 = disabled)
+    reverse_trim: Integer  -- reverse voltage scale factor n/128 (0 = disabled)
+}
+
+value MotionCharacteristics {
+    acceleration_rate: Integer          -- base momentum on acceleration (0 = none)
+    deceleration_rate: Integer          -- base momentum on braking (0 = none)
+    acceleration_adjustment: Integer    -- ±delta applied to acceleration_rate
+    deceleration_adjustment: Integer    -- ±delta applied to deceleration_rate
+    packet_timeout: Integer             -- 0 = no timeout; else timeout period count
+    emf_feedback_cutout_step: Integer   -- back-EMF cutoff speed step (1-128)
+}
+
+value DynamicState {
+    -- Volatile; not retained across power interruptions.
+    -- Transmitted via Unsolicited Decoder Initiated Transmission.
+    load: Integer           -- current decoder load (magnitude + sign)
+    flags: Integer          -- 8 dynamic status flags
+    fuel_coal_level: Integer -- 0=empty, 254=full, 255=not supported
+    water_level: Integer    -- 0=empty, 254=full, 255=not supported
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum CVRequirement { mandatory | recommended | optional }
+
+enum PowerSource {
+    nmra_digital | analog | radio | zero_one | trix | ctc16_railcommand | fmz_fleischmann
+}
+
+------------------------------------------------------------
+-- Config: CV Number Registry
+------------------------------------------------------------
+
+config {
+    -- ── Multi-function Decoder CVs (Table 1) ─────────────
+
+    -- Mandatory (M)
+    cv_primary_address: Integer = 1       -- default=3; short address 1-127; 0→analog mode
+    cv_manufacturer_version: Integer = 7  -- read-only
+    cv_manufacturer_id: Integer = 8       -- read-only; 255=factory reset trigger
+    cv_decoder_config: Integer = 29       -- mandatory when any controlled feature is provided
+
+    -- Recommended (R)
+    cv_vstart: Integer = 2
+    cv_acceleration_rate: Integer = 3
+    cv_deceleration_rate: Integer = 4
+    cv_packet_timeout: Integer = 11
+
+    -- Optional (O) — behaviorally significant
+    cv_vhigh: Integer = 5
+    cv_vmid: Integer = 6
+    cv_pwm_period: Integer = 9
+    cv_emf_feedback_cutout: Integer = 10
+    cv_power_source_conversion: Integer = 12
+    cv_alt_mode_functions_f1_f8: Integer = 13
+    cv_alt_mode_functions_fl_f9_f12: Integer = 14
+    cv_decoder_lock_key: Integer = 15
+    cv_decoder_lock_id: Integer = 16
+    cv_extended_address_high: Integer = 17
+    cv_extended_address_low: Integer = 18
+    cv_consist_address: Integer = 19
+    cv_consist_active_f1_f8: Integer = 21
+    cv_consist_active_fl_f9_f12: Integer = 22
+    cv_acceleration_adjustment: Integer = 23
+    cv_deceleration_adjustment: Integer = 24
+    cv_speed_table_select: Integer = 25
+    cv_auto_stop_config: Integer = 27
+    cv_bidirectional_config: Integer = 28
+    cv_error_information: Integer = 30
+    cv_index_high: Integer = 31
+    cv_index_low: Integer = 32
+    cv_output_location_fl_f: Integer = 33
+    cv_output_location_fl_r: Integer = 34
+    -- CV35-46: output locations for F1-F12
+    cv_kick_start: Integer = 65
+    cv_forward_trim: Integer = 66
+    -- CV67-94: 28-entry custom speed table
+    cv_speed_table_first: Integer = 67
+    cv_speed_table_last: Integer = 94
+    cv_reverse_trim: Integer = 95
+    cv_user_id_1: Integer = 105
+    cv_user_id_2: Integer = 106
+
+    -- Dynamic (volatile) CVs — CV880-895
+    cv_decoder_load: Integer = 892
+    cv_dynamic_flags: Integer = 893
+    cv_fuel_coal: Integer = 894
+    cv_water: Integer = 895
+
+    -- ── Accessory Decoder CVs (Table 3) ──────────────────
+    -- Primary numbers 1-32; upper aliases 513-544 are optional equivalents.
+
+    cv_acc_address_lsb: Integer = 1        -- [513]; M; 6 LSBs; default=1
+    cv_acc_auxiliary_activation: Integer = 2  -- [514]; O
+    cv_acc_time_on_f1: Integer = 3         -- [515]; O
+    cv_acc_time_on_f2: Integer = 4         -- [516]; O
+    cv_acc_time_on_f3: Integer = 5         -- [517]; O
+    cv_acc_time_on_f4: Integer = 6         -- [518]; O
+    cv_acc_manufacturer_version: Integer = 7   -- [519]; M
+    cv_acc_manufacturer_id: Integer = 8    -- [520]; M
+    cv_acc_address_msb: Integer = 9        -- [521]; M; 3 MSBs
+    cv_acc_bidirectional_config: Integer = 28  -- [540]; O
+    cv_acc_decoder_config: Integer = 29    -- [541]; M1
+    cv_acc_index_high: Integer = 31
+    cv_acc_index_low: Integer = 32
+}
+
+------------------------------------------------------------
+-- Black Box Functions
+------------------------------------------------------------
+
+-- Decodes CV29 value into named capability flags for multi-function decoders.
+function decode_capability_flags(cv29: Integer) -> DecoderCapabilityFlags
+
+-- Decodes CV29 (CV541) value into named capability flags for accessory decoders.
+function decode_accessory_capability_flags(cv29: Integer) -> AccessoryDecoderCapabilityFlags
+
+-- Constructs the 14-bit long address from CV17 (high) and CV18 (low).
+function combine_extended_address(cv17: Integer, cv18: Integer) -> Integer
+
+-- Constructs the accessory decoder address from CV1[513] (LSB) and CV9[521] (MSB).
+function combine_accessory_address(cv_lsb: Integer, cv_msb: Integer) -> Integer
+
+-- Extracts the 7-bit consist address from CV19 (bits 0-6).
+function consist_address_from_cv19(cv19: Integer) -> Integer
+
+-- Extracts the direction flag from CV19 (bit 7).
+function consist_reversed_from_cv19(cv19: Integer) -> Boolean
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ── Addressing ──────────────────────────────────────────
+
+-- CV29 bit 5 selects short (7-bit) vs long (14-bit) addressing mode.
+rule DecoderSelectsAddressMode {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 29
+
+    let flags = decode_capability_flags(value)
+
+    ensures: decoder.address_mode =
+        flags.long_address_enabled ? long_14bit : short_7bit
+
+    @guidance
+        -- When long_address_enabled: decoder responds to the 14-bit address
+        -- formed from CV17 and CV18. When cleared: responds to CV1.
+}
+
+-- Long address is recomputed whenever CV17 or CV18 changes.
+rule DecoderUpdatesLongAddress {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 17 or cv_number = 18
+
+    let cv17 = ConfigurationVariable where decoder = decoder and number = 17
+    let cv18 = ConfigurationVariable where decoder = decoder and number = 18
+
+    ensures: decoder.address = combine_extended_address(cv17.value, cv18.value)
+
+    @guidance
+        -- CV17 valid range is 192-254 (binary 11000000-11111110).
+        -- CV18 may be any value 0-255. Together they form a 14-bit address.
+}
+
+-- ── Direction ───────────────────────────────────────────
+
+-- CV29 bit 0 controls whether the decoder reverses its direction mapping.
+rule DecoderSetsDirectionPolarity {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 29
+
+    let flags = decode_capability_flags(value)
+
+    @guidance
+        -- When direction_reversed: the decoder swaps forward and reverse.
+        -- Direction-sensitive functions (FL forward/reverse) also swap.
+        -- See S-9.1.1 for directional function details.
+}
+
+-- ── Consist Configuration ───────────────────────────────
+
+-- CV19 sets the consist address and direction flag for this decoder.
+rule DecoderUpdatesConsistAddress {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 19
+
+    let addr = consist_address_from_cv19(value)
+
+    ensures: decoder.consist_address = addr = 0 ? null : addr
+    ensures: decoder.consist_reversed = consist_reversed_from_cv19(value)
+
+    @guidance
+        -- CV19 bits 0-6: 7-bit consist address. 0 = not in consist.
+        -- CV19 bit 7: 1 = this decoder's direction is reversed within the consist.
+}
+
+-- CV21 controls which of F1-F8 respond to the consist address.
+rule DecoderUpdatesConsistFunctionRoutingF1F8 {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 21
+
+    @guidance
+        -- One bit per function: bit 0=F1 … bit 7=F8.
+        -- 1 = function responds to consist address instructions.
+        -- 0 = function responds only to locomotive address instructions.
+}
+
+-- CV22 controls which of FL/F9-F12 respond to the consist address.
+rule DecoderUpdatesConsistFunctionRoutingFLF9F12 {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 22
+
+    @guidance
+        -- Bit 0=FL(forward), bit 1=FL(reverse), bit 2=F9 … bit 5=F12.
+        -- 1 = responds to consist address; 0 = responds to locomotive address.
+}
+
+-- ── Speed Profile ───────────────────────────────────────
+
+-- CV2 sets the start voltage: drive level applied at speed step 1.
+rule DecoderUpdatesVstart {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 2
+
+    @guidance
+        -- Drive level is a fraction of available rectified supply voltage.
+        -- When equal to zero, no voltage is applied at step 1.
+}
+
+-- CV5 sets the high voltage: drive level at maximum speed step.
+rule DecoderUpdatesVhigh {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 5
+
+    @guidance
+        -- Values 0 or 1 signal that Vhigh is not used in the speed table.
+}
+
+-- CV6 sets the mid voltage: drive level at the middle speed step.
+rule DecoderUpdatesVmid {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 6
+
+    @guidance
+        -- Values 0 or 1 signal that Vmid is not used in the speed table.
+}
+
+-- CV29 bit 4 selects which source the decoder uses for its speed profile.
+rule DecoderSelectsSpeedTableSource {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 29
+
+    let flags = decode_capability_flags(value)
+
+    @guidance
+        -- uses_custom_speed_table = false: speed curve from CV2, CV5, CV6.
+        -- uses_custom_speed_table = true: 28-entry voltage table from CV67-94.
+}
+
+-- CV65 sets the kick start value: extra voltage when transitioning stop → step 1.
+rule DecoderUpdatesKickStart {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 65
+
+    @guidance
+        -- 0 = no kick start. Non-zero = a brief extra voltage pulse is applied
+        -- when the motor starts from rest.
+}
+
+-- CV66 sets the forward trim scale factor.
+rule DecoderUpdatesForwardTrim {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 66
+
+    @guidance
+        -- Effective forward voltage = nominal * (CV66 / 128).
+        -- 0 = forward trim not implemented.
+}
+
+-- CV95 sets the reverse trim scale factor.
+rule DecoderUpdatesReverseTrim {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 95
+
+    @guidance
+        -- Effective reverse voltage = nominal * (CV95 / 128).
+        -- 0 = reverse trim not implemented.
+}
+
+-- ── Motion Characteristics ──────────────────────────────
+
+-- CV3 sets the base acceleration rate (momentum on acceleration).
+rule DecoderUpdatesAccelerationRate {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 3
+
+    @guidance
+        -- Formula: (CV3 * 0.896) / num_speed_steps seconds per step.
+        -- 0 = no programmed momentum on acceleration.
+}
+
+-- CV4 sets the base deceleration rate (momentum on braking).
+rule DecoderUpdatesDecelerationRate {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 4
+
+    @guidance
+        -- Same formula as CV3. 0 = no programmed momentum on braking.
+}
+
+-- CV23 adds a signed adjustment to the effective acceleration rate.
+rule DecoderUpdatesAccelerationAdjustment {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 23
+
+    @guidance
+        -- Bits 0-6: magnitude. Bit 7: 0=add to CV3, 1=subtract from CV3.
+        -- Overflow clamps to maximum rate; underflow clamps to zero (no momentum).
+        -- Intended for fine-tuning acceleration within a consist.
+}
+
+-- CV24 adds a signed adjustment to the effective deceleration rate.
+rule DecoderUpdatesDecelerationAdjustment {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 24
+
+    @guidance
+        -- Same sign/magnitude encoding as CV23, applied to CV4.
+}
+
+-- CV11 sets the packet timeout: how long the decoder holds speed without a packet.
+rule DecoderUpdatesPacketTimeout {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 11
+
+    @guidance
+        -- 0 = no timeout; decoder maintains last commanded speed indefinitely.
+        -- Non-zero: decoder begins decelerating after this many timeout periods
+        -- without receiving a valid addressed packet. Timeout period defined in
+        -- S-9.2.4 Section C.
+}
+
+-- CV10 sets the back-EMF feedback cutout speed step.
+rule DecoderUpdatesEMFFeedbackCutout {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 10
+    requires: value >= 1 and value <= 128
+
+    @guidance
+        -- Back-EMF motor control is disabled above this speed step.
+        -- When using 14 or 28 speed steps, LSBs of the value are truncated.
+}
+
+-- ── Analog / Power Source Conversion ────────────────────
+
+-- Writing CV1 = 0 causes the decoder to leave NMRA digital mode.
+rule DecoderEntersAnalogMode {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 1
+    requires: value = 0
+
+    @guidance
+        -- The decoder converts to the alternate power source identified by CV12.
+        -- This does not affect the decoder's ability to respond to service mode
+        -- packets (see S-9.2.3). CV12 holds the NMRA-assigned power source code.
+}
+
+-- ── Dynamic CVs ─────────────────────────────────────────
+
+-- CV892 reflects the current decoder load (volatile; not stored across power loss).
+rule DecoderUpdatesDynamicLoad {
+    when: DecoderLoadMeasured(decoder, load_value)
+
+    requires: load_value >= 0 and load_value <= 255
+
+    ensures: (ConfigurationVariable where decoder = decoder and number = 892).value = load_value
+
+    @guidance
+        -- Bits 0-6: magnitude (0-127). Bit 7: sign (0=positive load, 1=negative).
+        -- Transmitted via Unsolicited Decoder Initiated Transmission.
+}
+
+-- CV894 reflects the current fuel/coal resource level (volatile).
+rule DecoderUpdatesFuelCoalLevel {
+    when: FuelCoalLevelChanged(decoder, level)
+
+    requires: level >= 0 and level <= 255
+
+    ensures: (ConfigurationVariable where decoder = decoder and number = 894).value = level
+
+    @guidance
+        -- 0 = empty, 254 = full, 255 = feature not supported (must not be transmitted).
+}
+
+-- CV895 reflects the current water resource level (volatile).
+rule DecoderUpdatesWaterLevel {
+    when: WaterLevelChanged(decoder, level)
+
+    requires: level >= 0 and level <= 255
+
+    ensures: (ConfigurationVariable where decoder = decoder and number = 895).value = level
+
+    @guidance
+        -- Same semantics as CV894 (fuel/coal).
+}
+
+-- ── Accessory Decoder Address ───────────────────────────
+
+-- Accessory decoder address is computed from CV1[513] (LSB) and CV9[521] (MSB).
+rule AccessoryDecoderUpdatesAddress {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 1 or cv_number = 9
+
+    let cv_lsb = ConfigurationVariable where decoder = decoder and number = 1
+    let cv_msb = ConfigurationVariable where decoder = decoder and number = 9
+
+    ensures: decoder.address = combine_accessory_address(cv_lsb.value, cv_msb.value)
+
+    @guidance
+        -- CV1[513]: 6 LSBs of decoder address (bits 0-5); default = 1.
+        -- CV9[521]: 3 MSBs of decoder address (bits 0-2, transmitted as ones-complement).
+        -- For output-address mode: Output-Address = (CV1 + CV9 * 256) - 1.
+        -- Factory default: CV1=1, CV9=0 → decoder responds to broadcast accessory packet.
+}
+
+-- ── Accessory Decoder Type ──────────────────────────────
+
+-- CV29[541] bit 5 determines basic vs extended accessory decoder type.
+rule AccessoryDecoderSetsType {
+    when: ConfigurationVariableWritten(decoder, cv_number, value)
+
+    requires: cv_number = 29
+
+    let flags = decode_accessory_capability_flags(value)
+
+    ensures: decoder.kind =
+        flags.is_extended_type ? ExtendedAccessoryDecoder : BasicAccessoryDecoder
+
+    @guidance
+        -- Basic (bit 5=0): controls paired output activations.
+        -- Extended (bit 5=1): receives aspect number commands.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant ManufacturerIDIsReadOnly {
+    -- CV8 value cannot be changed except by factory reset trigger (CV8=255).
+    -- Normal CV write operations must not alter CV8.
+}
+
+invariant ManufacturerVersionIsReadOnly {
+    -- CV7 is read-only and holds manufacturer-defined version information.
+}
+
+invariant ExtendedAddressHighByteRange {
+    -- CV17 must be in range 192-254 for a valid long address.
+    for d in MultiFunctionDecoders:
+        d.address_mode = long_14bit implies
+            let cv17 = ConfigurationVariable where decoder = d and number = 17
+            cv17.value >= 192 and cv17.value <= 254
+}
+
+invariant DynamicCVsNotProgrammedViaServiceMode {
+    -- CVs 880-895 are volatile and must not be written via service mode.
+    -- Their values are set by decoder-internal events, not by command station writes.
+}
+
+invariant UnsupportedFeatureBitsHoldDefault {
+    -- If a decoder does not support a feature controlled by a bit in CV27, CV28, or CV29,
+    -- the corresponding bit must always hold its factory default value.
+    -- Decoder must not allow unsupported bits to be written to non-default values.
+}
+
+invariant AccessoryDecoderMustSupportAtLeastOneAddressingType {
+    -- An accessory decoder must support Decoder-Address mode,
+    -- Output-Address mode, or both. The supported type(s) must be
+    -- documented in the decoder manual and on the packaging.
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred IndexedCVArea.access          -- see: indexed CV pages via CV31/32 (CV257-512)
+deferred OutputLocationMatrix.map      -- see: CV33-46 function-to-output assignment
+deferred SUSIModules.cv_map            -- see: TI-9.2.3 (CV896-1024)
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "CV29 modelling: CV29 is a bitmask controlling multiple independent capabilities. The current model uses decode_capability_flags() as a black box. Should each bit instead be a separate named CV configuration aspect at the domain level, making the bit-packing an implementation detail entirely hidden from rules?"
+
+open question "Indexed CV area (CV31/32 → CV257-512): the mechanism provides up to 61,440 manufacturer pages of 256 CVs each. Should this be modelled as ConfigurationVariable with a compound key (page, offset), or is it sufficient to defer it and only model the index pointer CVs (31, 32) here?"
+
+open question "Output location matrix (CV33-46): the matrix maps function commands to physical decoder output channels. Is this domain behaviour (should rules link function activation events to output state changes) or implementation-level configuration below the domain boundary?"
+
+open question "Packet timeout (CV11): the timeout period unit is defined in S-9.2.4. Should the rule be deferred until S-9.2.4 is available, or modelled now with an abstract 'timeout_period' unit and the concrete value deferred?"
+
+open question "Analog mode (CV1=0 / CV12): when CV1=0 the decoder leaves NMRA digital mode. Should PowerSource be a first-class entity with its own decoder surface, or remain a configuration attribute?"
+
+open question "Accessory decoder CV alias ambiguity: CVs 1-32 and CVs 513-544 are described as optional alternates for accessory decoders, not separate CV spaces. Should rules reference both sets (e.g., 'cv_number = 1 or cv_number = 513') or should a single canonical numbering be chosen with the alias noted in guidance?"

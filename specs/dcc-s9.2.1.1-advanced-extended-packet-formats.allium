@@ -1,0 +1,771 @@
+-- allium: 3
+-- dcc-s9.2.1.1-advanced-extended-packet-formats.allium
+-- NMRA S-9.2.1.1: Advanced Extended Packet Formats (May 2022)
+--
+-- Scope: Address partitions 253 and 254 — logon, data spaces, bulk transfer
+-- Includes:
+--   Packet framing rules for address partitions 253 and 254
+--   Sequenced message integrity requirement
+--   Feedback cutout selection state machine (off / starting / enabled)
+--   Decoder logon state machine (unselected / selected)
+--   Logon procedure: enumeration, confirmation, assignment, discovery
+--   Back-off collision avoidance during enumeration
+--   Startup behaviour and CID/Session ID recognition
+--   Logon Assign: session address and change flags
+--   CV19 consist reaffirmation requirement
+--   Data spaces: Capabilities, Data Space Info, Short GUI, Configuration Variables
+--   WriteBlock, ReadBackground, ReadBlock bulk data operations
+--   Standardised error codes
+-- Excludes:
+--   Baseline packet formats (see S-9.2)
+--   Extended multi-function / accessory packet formats (see S-9.2.1)
+--   Physical signal encoding and 6b/8b feedback encoding (see S-9.3.2)
+--   CRC-8 polynomial and checksum byte layout (implementation detail)
+--   Bit-level packet framing (implementation detail)
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity System {
+    -- Command station or control unit that sends DCC commands and
+    -- processes decoder feedback. Identified by a 16-bit CID.
+    -- Maintains a session ID incremented on every restart (rolls at 255 → 0).
+}
+
+external entity MultiFunctionDecoder {
+    -- Defined in dcc-s9.2.1-extended-packet-formats.allium.
+    -- Has: address, address_mode, consist_address, active_functions.
+}
+
+external entity AccessoryDecoder {
+    -- Defined in dcc-s9.2.1-extended-packet-formats.allium.
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value DecoderIdentity {
+    manufacturer_id: Integer    -- 12-bit NMRA-assigned manufacturer ID
+    unique_id: Integer          -- 32-bit decoder-unique value
+    did: Integer                -- 44-bit combined identity (manufacturer_id || unique_id)
+}
+
+value DecoderChangeFlags {
+    -- Reported in Logon Assign response. Indicates what has changed since
+    -- the last time the System cleared the flags.
+    in_cv19_consist: Boolean                   -- CV19 consist address is non-zero
+    gui_data_changed: Boolean                  -- name / image changed
+    function_assignment_changed: Boolean       -- function assignments changed
+    driving_behavior_changed: Boolean          -- speed table, momentum, etc. changed
+    firmware_changed: Boolean                  -- firmware updated
+    flags_reset_on_different_system: Boolean   -- last reset was performed by a different system
+}
+
+value FunctionCapability {
+    behavior: undefined | latching | momentary | trigger
+}
+
+value ShortGUI {
+    name: String                -- up to 8 UTF-8 bytes, padded with 0x00
+    image_index: Integer        -- display image hint; further definition deferred
+    principal_symbol: PrincipalSymbol
+    function_info: Map<Integer, FunctionCapability>  -- F0-F68; omit entries beyond last configured
+}
+
+value ErrorResponse {
+    code: ErrorCode
+    is_permanent: Boolean       -- true = permanent; false = temporary (may retry)
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum LogonState { unselected | selected }
+
+enum LogonGroup { all | loco_only | accessory_only | now }
+
+enum PrincipalSymbol {
+    -- Mobile decoder types
+    steam_locomotive | diesel_locomotive | electric_locomotive |
+    diesel_railcar | electric_railcar | cab_car_fred | passenger_car |
+    caboose | maintenance_of_way | generic_function_decoder |
+    automobile_car | automobile_truck | automobile_bus | automobile_other |
+    other_mobile | other_non_mobile |
+    -- Accessory decoder types
+    turnout_switch | signal | turntable | lighting | traffic_light |
+    accessory_other
+}
+
+enum ErrorCode {
+    permanent_unspecified |     -- 0x1000
+    unimplemented |             -- 0x1040
+    command_not_supported |     -- 0x1042
+    invalid_arguments |         -- 0x1080
+    unknown_data_space |        -- 0x1081
+    write_offset_out_of_bounds | -- 0x1082
+    data_space_read_only |      -- 0x1083
+    temporary_unspecified |     -- 0x2000
+    timeout |                   -- 0x2010
+    decoder_busy |              -- 0x2020
+    unexpected_sequence |       -- 0x2040
+    decoder_state_reset         -- 0x2041
+}
+
+enum WriteBlockStatus {
+    success | success_data_mismatch | permanent_error | temporary_error | in_progress
+}
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity Decoder {
+    identity: DecoderIdentity
+
+    logon_state: LogonState
+
+    transitions logon_state {
+        unselected -> selected
+        selected   -> unselected
+        terminal:
+    }
+
+    -- Session address assigned by Logon Assign for the current session.
+    -- Null means the decoder uses its permanent DCC address.
+    session_address: Integer?
+
+    -- Persistent: CID and session ID of the last System that assigned this decoder.
+    last_known_cid: Integer?
+    last_known_session_id: Integer?
+
+    -- Change flags and change counter (persisted across power cycles).
+    change_flags: DecoderChangeFlags
+    change_counter: Integer     -- 0-0xFFE; 0xFFF always indicates "changed"
+
+    -- Feedback cutout selection state (see TN-9.2.1.1 §2.2.5).
+    cutout_state: CutoutState
+
+    -- Consist reaffirmation: after reverting to permanent address the decoder
+    -- ignores its CV19 value until reaffirmed by the current System.
+    cv19_reaffirmed: Boolean
+
+    effective_address: session_address ?? permanent_address
+    is_using_session_address: session_address != null
+}
+
+entity DataSpace {
+    decoder: Decoder
+    number: Integer     -- 0-255; standard numbers: 0=Capabilities, 1=Info, 2=ShortGUI, 3=CVs
+    content: Bytes
+    read_only: Boolean
+    supported: Boolean
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Address partitions this standard governs
+    address_partition_253: Integer = 253
+    address_partition_254: Integer = 254
+
+    -- Standard data space numbers
+    data_space_capabilities: Integer = 0     -- read-only
+    data_space_info: Integer = 1             -- read-only
+    data_space_short_gui: Integer = 2        -- read/write
+    data_space_cv: Integer = 3              -- read/write (CV indexed space)
+
+    -- Packet length threshold above which CRC-8 + XOR is required.
+    -- Packets of exactly 7 bytes total are forbidden.
+    extended_error_detection_threshold: Integer = 6  -- bytes inclusive of checksum
+
+    -- NOTE: Allium Duration literals do not support sub-second granularity.
+    -- The standard requires: 700ms startup logon wait, 700ms WriteBlock
+    -- timeout, 500ms WriteBlock progress report interval.
+    -- These constraints are captured as open questions below.
+}
+
+------------------------------------------------------------
+-- Black Box Functions
+------------------------------------------------------------
+
+-- Returns true if the two session IDs are within 3 increments of each other
+-- (wrapping at 255), meaning the System is likely the same session.
+function session_id_close_enough(stored: Integer, received: Integer) -> Boolean
+
+-- Computes the combined 44-bit DID from manufacturer_id and unique_id.
+function make_did(manufacturer_id: Integer, unique_id: Integer) -> Integer
+
+-- Returns the capabilities flags for a given decoder as a structured value.
+function read_capabilities(decoder: Decoder) -> DecoderCapabilityFlags
+
+-- Increments change_counter, clamping at 0xFFF.
+function increment_change_counter(current: Integer) -> Integer
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ── Packet Framing ──────────────────────────────────────
+
+-- A decoder must verify both CRC-8 and XOR checksums for packets longer than 6 bytes.
+rule DecoderValidatesExtendedChecksum {
+    when: LongPacketReceived(decoder, packet)
+
+    requires: packet.total_length > 6
+    requires: packet.total_length != 7   -- 7-byte packets are explicitly forbidden
+
+    -- Decoder discards the packet if either checksum fails.
+    @guidance
+        -- For packets ≤ 6 bytes: only XOR checksum (as per S-9.2).
+        -- For packets > 6 bytes: CRC-8 + XOR. Both must pass.
+        -- 7-byte packets shall never be sent and shall be ignored on receipt.
+}
+
+-- ── Sequenced Messages ──────────────────────────────────
+
+-- A decoder acts on a sequenced message only after receiving an uninterrupted
+-- stream of valid packets since the message that started the sequence.
+rule DecoderActsOnSequencedMessage {
+    when: SequencedMessageReceived(decoder, message)
+
+    requires: decoder.received_uninterrupted_sequence_since(message.sequence_start)
+
+    -- Decoder processes message.
+    @guidance
+        -- "Uninterrupted" means no checksum errors in any packet received
+        -- since the first packet of the sequence. The System shall not
+        -- interleave other track protocol packets within a sequence.
+}
+
+-- ── Feedback Cutout Selection State Machine ─────────────
+--
+-- Source: TN-9.2.1.1 Section 2.2.5 (normative clarification to S-9.2.1.1)
+--
+-- A decoder maintains a cutout state (off / starting / enabled) that
+-- determines whether it may transmit data in a feedback cutout window.
+-- This state machine is evaluated at each packet end bit.
+
+enum CutoutState { off | starting | enabled }
+
+-- Receiving a Select(ReadBlock) or ReadBlock addressed to this decoder
+-- arms the cutout, transitioning from off → starting.
+rule DecoderArmsCutoutOnReadCommand {
+    when: PacketReceived(decoder, packet)
+
+    requires: (packet is SelectReadBlock or packet is ReadBlock)
+        and packet.address = decoder.effective_address
+
+    ensures: decoder.cutout_state = starting
+}
+
+-- A Get Data Start received while in starting state enables the cutout.
+rule DecoderEnablesCutoutOnGetDataStart {
+    when: PacketReceived(decoder, packet)
+
+    requires: packet is GetDataStart
+    requires: decoder.cutout_state = starting
+
+    ensures: decoder.cutout_state = enabled
+}
+
+-- A Get Data Start arriving in any state other than starting disables the cutout.
+-- This handles the case where a different decoder was addressed.
+rule DecoderDisablesCutoutOnUnexpectedGetDataStart {
+    when: PacketReceived(decoder, packet)
+
+    requires: packet is GetDataStart
+    requires: decoder.cutout_state != starting
+
+    ensures: decoder.cutout_state = off
+}
+
+-- While enabled, the decoder transmits data in ch1+ch2 on Get Data packets.
+rule DecoderTransmitsInCutoutWhenEnabled {
+    when: PacketReceived(decoder, packet)
+
+    requires: decoder.cutout_state = enabled
+    requires: packet is GetDataStart or packet is GetDataContinue
+
+    -- Decoder transmits its next data chunk in feedback channels 1 and 2.
+}
+
+-- Any checksum failure or non-DCC packet/timeout resets the cutout to off.
+rule DecoderResetsCutoutOnChecksumFailureOrTimeout {
+    when: PacketReceived(decoder, packet)
+
+    requires: not packet.is_valid or packet is NonDCCSignal
+
+    ensures: decoder.cutout_state = off
+}
+
+-- ── Logon: Startup ──────────────────────────────────────
+
+-- On startup, if the decoder recognises the System (CID and session ID match),
+-- it begins in Selected state and uses its previously assigned address.
+rule DecoderStartsSelectedIfKnownSystem {
+    when: DecoderStartedUp(decoder, received_cid, received_session_id)
+
+    requires: decoder.last_known_cid = received_cid
+    requires: session_id_close_enough(decoder.last_known_session_id, received_session_id)
+
+    ensures: decoder.logon_state = selected
+
+    @guidance
+        -- "Close enough" means the session ID is the same or has been
+        -- incremented by fewer than 4 since the last stored value.
+        -- The decoder accepts control at its previously assigned address.
+}
+
+-- On startup, if the System is not recognised, the decoder starts in Unselected state.
+rule DecoderStartsUnselected {
+    when: DecoderStartedUp(decoder, received_cid, received_session_id)
+
+    requires: decoder.last_known_cid != received_cid
+        or not session_id_close_enough(decoder.last_known_session_id, received_session_id)
+
+    ensures: decoder.logon_state = unselected
+    ensures: decoder.session_address = null
+}
+
+-- If no Logon Enable is received within the startup window, the decoder
+-- uses its permanent DCC address and, if set, its CV19 consist address.
+rule DecoderFallsBackToPermanentAddress {
+    when: StartupLogonWindowExpired(decoder)
+
+    requires: decoder.logon_state = unselected
+
+    ensures: decoder.session_address = null
+    ensures: decoder.cv19_reaffirmed = true  -- permanent address honours CV19 directly
+
+    @guidance
+        -- The standard requires a 700ms startup window before the decoder
+        -- proceeds with its permanent address. Sub-second Duration not
+        -- expressible in Allium v3 — see open questions.
+}
+
+-- ── Logon: Enumeration ──────────────────────────────────
+
+-- Logon Enable (Now) resets a decoder's back-off counter and forces an immediate reply.
+rule DecoderResetsBackoffOnLogonEnableNow {
+    when: LogonEnableReceived(decoder, group, system_cid, session_id)
+
+    requires: decoder.logon_state = unselected
+    requires: group = now
+
+    -- Decoder sends its DID immediately in feedback channels 1 and 2.
+    @guidance
+        -- The "Now" group overrides any back-off state. Decoders of all
+        -- types respond regardless of address group.
+}
+
+-- Logon Enable (not Now) causes an Unselected decoder to respond after its back-off.
+rule DecoderRespondsToLogonEnableWithBackoff {
+    when: LogonEnableReceived(decoder, group, system_cid, session_id)
+
+    requires: decoder.logon_state = unselected
+    requires: group != now
+    requires: decoder.matches_logon_group(group)
+
+    -- Decoder replies with its DID when its back-off counter expires.
+    @guidance
+        -- Initial back-off range 0-7. Grows to 0-15, 0-31, 0-63 if repeated
+        -- Logon Enable messages arrive without the decoder receiving a Select.
+        -- A True Random Number Generator (TRNG) may be used for the random draw.
+        -- The sequence must satisfy: any population generates uniformly
+        -- distributed numbers at each step, and any two decoders by the same
+        -- manufacturer differ in sequence within the first 64 bits.
+}
+
+-- A Selected decoder does not respond to Logon Enable messages.
+rule SelectedDecoderIgnoresLogonEnable {
+    when: LogonEnableReceived(decoder, group, system_cid, session_id)
+
+    requires: decoder.logon_state = selected
+
+    -- Decoder takes no action.
+}
+
+-- ── Logon: Confirmation ─────────────────────────────────
+
+-- A Select command addressed to the decoder's DID transitions it to Selected state.
+rule DecoderTransitionsToSelected {
+    when: SelectPacketReceived(decoder, target_did, command)
+
+    requires: decoder.identity.did = target_did
+
+    ensures: decoder.logon_state = selected
+
+    @guidance
+        -- Once Selected, the decoder stops responding to Logon Enable messages.
+        -- The decoder returns its ReadShortInfo or ACK as specified by the
+        -- sub-command field of the Select packet.
+}
+
+-- ── Logon: Assignment ───────────────────────────────────
+
+-- Logon Assign gives the decoder a session-specific DCC address.
+rule DecoderAcceptsSessionAddress {
+    when: LogonAssignReceived(decoder, target_did, assigned_address)
+
+    requires: decoder.identity.did = target_did
+    requires: assigned_address >= 1
+
+    ensures: decoder.session_address = assigned_address
+    ensures: decoder.last_known_cid = current_system.cid
+    ensures: decoder.last_known_session_id = current_system.session_id
+    ensures: decoder.change_counter = increment_change_counter(decoder.change_counter)
+
+    @guidance
+        -- The assigned address is valid for this session only.
+        -- It must NOT modify CV1, CV17, CV18, or CV19 for mobile decoders,
+        -- nor CV1[513] or CV9[521] for accessory decoders.
+        -- The Decoder returns change flags and change counter in feedback.
+}
+
+-- Assigning address 0 is an error: the decoder enters an error display state.
+rule DecoderErrorOnZeroAddressAssignment {
+    when: LogonAssignReceived(decoder, target_did, assigned_address)
+
+    requires: decoder.identity.did = target_did
+    requires: assigned_address = 0
+
+    ensures: decoder.logon_state = unselected
+    ensures: decoder.session_address = null
+
+    @guidance
+        -- A mobile decoder indicates error by a double blink of front and
+        -- rear lights (1-2 second period: on-off-on-off-blank).
+        -- This requirement is waived if the hardware does not support it.
+}
+
+-- ── Logon: CV19 Consist Reaffirmation ──────────────────
+
+-- After using a session address, on reversion to permanent address the decoder
+-- ignores CV19 until the System reaffirms the consist address.
+rule DecoderIgnoresCV19UntilReaffirmed {
+    when: DecoderRevertsToPermamentAddress(decoder)
+
+    ensures: decoder.cv19_reaffirmed = false
+
+    @guidance
+        -- Reaffirmation is performed by the System either via a POM write
+        -- to CV19 or by sending a Consist Control instruction.
+        -- Until reaffirmed, the decoder behaves as if CV19 = 0 (no consist).
+}
+
+rule DecoderHonoursConsistAfterReaffirmation {
+    when: ConsistAddressReaffirmed(decoder)
+
+    ensures: decoder.cv19_reaffirmed = true
+}
+
+-- ── Decoder Internal Status ─────────────────────────────
+
+-- Set Decoder Internal Status with 0xFF clears all change flags to zero.
+rule DecoderClearsChangeFlags {
+    when: SetDecoderInternalStatusReceived(decoder, target_did, command)
+
+    requires: decoder.identity.did = target_did
+
+    ensures: decoder.change_flags = DecoderChangeFlags {
+        in_cv19_consist = false,
+        gui_data_changed = false,
+        function_assignment_changed = false,
+        driving_behavior_changed = false,
+        firmware_changed = false,
+        flags_reset_on_different_system = false
+    }
+}
+
+-- ── Data Spaces: Write ─────────────────────────────────
+
+-- WriteBlock writes bytes into a data space at the specified offset.
+rule DecoderWritesDataSpaceBlock {
+    when: WriteBlockReceived(decoder, data_space_number, offset, payload)
+
+    requires: decoder.logon_state = selected
+    let ds = DataSpace where decoder = decoder and number = data_space_number
+    requires: ds.supported
+    requires: not ds.read_only
+    requires: offset + length(payload) <= length(ds.content)
+
+    ensures: ds.content = write_bytes(ds.content, offset, payload)
+
+    @guidance
+        -- The decoder sends ACK immediately, then sends a write progress
+        -- or completion status in feedback channel 2 on the next addressed
+        -- packet to this decoder.
+        -- If no write feedback is sent within 700ms, the System shall assume
+        -- the write was lost (sub-second Duration — see open questions).
+        -- The decoder shall send in-progress feedback at least every 500ms.
+}
+
+-- WriteBlock to a read-only data space returns an error.
+rule DecoderRejectsReadOnlyDataSpaceWrite {
+    when: WriteBlockReceived(decoder, data_space_number, offset, payload)
+
+    requires: decoder.logon_state = selected
+    let ds = DataSpace where decoder = decoder and number = data_space_number
+    requires: ds.read_only
+
+    -- Decoder returns data_space_read_only error in feedback.
+}
+
+-- WriteBlock to an unknown data space returns an error.
+rule DecoderRejectsUnknownDataSpaceWrite {
+    when: WriteBlockReceived(decoder, data_space_number, offset, payload)
+
+    requires: decoder.logon_state = selected
+    requires: not (DataSpace where decoder = decoder and number = data_space_number).supported
+
+    -- Decoder returns unknown_data_space error in feedback.
+}
+
+-- ── Data Spaces: Read ──────────────────────────────────
+
+-- ReadBackground initiates a background read of a data space; data is
+-- returned in feedback channel 2 on subsequent addressed packets.
+rule DecoderSendsReadBackgroundData {
+    when: ReadBackgroundReceived(decoder, data_space_number, offset, requested_size)
+
+    requires: decoder.logon_state = selected
+    let ds = DataSpace where decoder = decoder and number = data_space_number
+    requires: ds.supported
+
+    -- Decoder sends data chunks in ch2 feedback on each addressed packet,
+    -- using Variable Length Feedback format, until requested_size is exhausted
+    -- (or total data space is exhausted if size not specified).
+    @guidance
+        -- First chunk uses ID13; subsequent chunks use ID14.
+        -- CRC-8 seed for this response is the data space number.
+}
+
+-- ReadBlock initiates a fast data space read via Get Data Start / Continue sequence.
+rule DecoderSendsReadBlockData {
+    when: ReadBlockReceived(decoder, data_space_number, offset, requested_size)
+
+    requires: decoder.logon_state = selected
+    let ds = DataSpace where decoder = decoder and number = data_space_number
+    requires: ds.supported
+
+    -- Decoder sends data in response to Get Data Start / Continue messages.
+    @guidance
+        -- Get Data Start triggers the first feedback chunk in ch1+ch2.
+        -- Each Get Data Continue triggers the next chunk.
+        -- When no more data is available, decoder replies with ACK.
+        -- CRC-8 seed for the response is the data space number.
+}
+
+-- ── Data Space: Capabilities ───────────────────────────
+
+-- The Capabilities data space (0) reflects the decoder's supported protocol features.
+-- Its content must always match the decoder's actual supported capabilities.
+rule CapabilitiesDataSpaceReflectsSupport {
+    when: DecoderCapabilityChanged(decoder)
+
+    let ds = DataSpace where decoder = decoder and number = 0
+    ensures: ds.content = encode_capabilities(decoder)
+
+    @guidance
+        -- Capabilities bytes 0-1 are also returned inline in the
+        -- ReadShortInfo response to a Select command.
+        -- Capabilities bytes 2-3 are returned in the Logon Assign feedback.
+}
+
+-- ── Data Space: Short GUI ──────────────────────────────
+
+-- A decoder's Short GUI data space contains its human-visible identity.
+rule DecoderExposesShortGUI {
+    when: ShortGUIUpdated(decoder, gui)
+
+    let ds = DataSpace where decoder = decoder and number = 2
+    ensures: ds.content = encode_short_gui(gui)
+    ensures: decoder.change_flags.gui_data_changed = true
+    ensures: decoder.change_counter = increment_change_counter(decoder.change_counter)
+
+    @guidance
+        -- Short GUI is mandatory for Throttle UI interaction type.
+        -- Name: up to 8 bytes UTF-8, padded with 0x00.
+        -- Function info: 2 bits per function (F0-F68).
+        -- Bytes beyond the last configured function are omitted.
+}
+
+-- ── Addressed S-9.2 / S-9.2.1 Chained ─────────────────
+
+-- A chained packet bundles multiple standard S-9.2 / S-9.2.1 instructions
+-- addressed to the same decoder into a single packet frame.
+rule DecoderProcessesChainedInstructions {
+    when: ChainedPacketReceived(decoder, instructions)
+
+    requires: decoder.logon_state = selected or decoder.is_using_session_address
+
+    -- Decoder processes each instruction in sequence, as if received individually.
+    -- Decoder sends ACK or feedback response in channel 2 upon successful receipt.
+    @guidance
+        -- Maximum packet length for chained packets is 16 bytes total
+        -- (including the 253 address byte and checksum byte(s)).
+        -- Multiple command/payload sequences cannot be chained if any is
+        -- an Addressed, Addressed Continue, or Addressed Control type.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant SessionAddressNotPermanent {
+    -- A session address assigned by Logon Assign is not stored to CV1/17/18/19.
+    -- It exists only for the duration of the current system session.
+    for d in Decoders:
+        d.is_using_session_address implies
+            (ConfigurationVariable where decoder = d and number = 1).value != d.session_address
+                or d.session_address = (ConfigurationVariable where decoder = d and number = 1).value
+    -- Note: the address MAY coincidentally equal the CV value; the key constraint is
+    -- that Logon Assign must not MODIFY CV1/17/18/19.
+}
+
+invariant CapabilitiesDataSpaceIsReadOnly {
+    for ds in DataSpaces:
+        ds.number = 0 implies ds.read_only = true
+}
+
+invariant DataSpaceInfoIsReadOnly {
+    for ds in DataSpaces:
+        ds.number = 1 implies ds.read_only = true
+}
+
+invariant ChangeCounterAtMaxAlwaysReportedAsChanged {
+    for d in Decoders:
+        d.change_counter = 0xFFF implies d.change_flags != null
+}
+
+invariant ForbiddenSevenBytePackets {
+    -- No packet addressed to partition 253 or 254 may be exactly 7 bytes long.
+    -- Such packets must be rejected without acknowledgment.
+}
+
+invariant SelectedDecoderAcknowledgesAddressedMessages {
+    -- A decoder in Selected state shall acknowledge all messages specifically
+    -- addressed to it on partition 253 or 254, even if it has no specific
+    -- response payload to return.
+    -- (Acknowledgment = 6 ACK bytes on partition 253; 8 ACK bytes on partition 254.)
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor LogonParticipant {
+    identified_by: Decoder where logon_state = unselected
+}
+
+actor SessionDecoder {
+    identified_by: Decoder where logon_state = selected
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface LogonInterface {
+    facing station: System
+
+    @guarantee UniqueIDIsPersistent
+        -- The 44-bit DID (manufacturer_id || unique_id) is fixed at
+        -- manufacture and does not change across power cycles or resets.
+
+    @guarantee SessionAddressIsTemporary
+        -- A session address from Logon Assign is valid only for the
+        -- current session. It is discarded on power loss or reset.
+
+    @guarantee ChangeCounterMonotonicallyIncreases
+        -- The change counter increments on every configuration or firmware
+        -- change. It wraps to 0xFFF and stays there (meaning "always changed").
+}
+
+surface DataSpaceInterface {
+    facing station: System
+
+    @guarantee CapabilitiesAlwaysAccurate
+        -- The Capabilities data space (0) always reflects the decoder's
+        -- actual supported feature set. It must not lag behind the decoder's
+        -- true capabilities.
+
+    @guarantee WriteBlockDoesNotModifyPermanentAddress
+        -- Writing to the CV data space via WriteBlock must not silently
+        -- modify the permanent DCC address CVs (CV1, CV17, CV18) in a way
+        -- that bypasses the service mode two-packet requirement.
+
+    @guarantee WriteBlockRequiresNoTwoPacketLatch
+        -- Unlike POM (which requires two identical packets before executing
+        -- a write), WriteBlock executes on a single packet. The CRC-8
+        -- checksum provides sufficient protection against erroneous writes.
+        -- Source: TN-9.2.1.1 §2.7.1.
+
+    @guarantee ReadBlockRequiresAddressPartition254Enabled
+        -- ReadBlock uses Get Data Start/Continue from address partition 254.
+        -- CV28 bit 7 must be set for address partition 254 commands to be
+        -- processed; if not set, ReadBlock transactions cannot complete.
+        -- Source: TN-9.2.1.1 §2.7.3.
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract LogonProtocol {
+    enumerate: (group: LogonGroup) -> DecoderIdentity
+    confirm: (did: DecoderIdentity) -> ShortInfo
+    assign: (did: DecoderIdentity, address: Integer) -> ChangeFlags
+
+    @invariant CollisionResolution
+        -- The back-off algorithm must ensure that in a population of
+        -- decoders from the same manufacturer, DID responses are
+        -- statistically separable within the available response windows.
+
+    @invariant SelectTerminatesEnumeration
+        -- Once a decoder receives a Select addressed to its DID, it
+        -- permanently stops responding to Logon Enable for that session.
+}
+
+contract DataSpaceAccess {
+    write: (space: Integer, offset: Integer, data: Bytes) -> WriteBlockStatus
+    read_background: (space: Integer, offset: Integer, size: Integer?) -> Bytes
+    read_block: (space: Integer, offset: Integer, size: Integer?) -> Bytes
+
+    @invariant ReadOnlyEnforced
+        -- Writes to data spaces 0 (Capabilities) and 1 (Data Space Info)
+        -- are always rejected with data_space_read_only.
+
+    @invariant UnknownSpaceRejected
+        -- Writes or reads to unsupported data space numbers are always
+        -- rejected with unknown_data_space.
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred FeedbackEncoding.channel     -- see: dcc-s9.3.2-basic-decoder-transmission.allium
+deferred AdvancedAcknowledgment.crc   -- see: dcc-s9.3.1-advanced-acknowledgment.allium
+deferred XPOM.operations              -- see: dcc-s9.2.1-extended-packet-formats.allium (XPOM)
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "Sub-second Duration constraints: the standard requires a 700ms startup logon window, a 700ms WriteBlock timeout, a 500ms WriteBlock in-progress interval, and a 300ms Logon Enable period. None of these are expressible in Allium v3 Duration literals. Should .milliseconds be added to the language, or should these be modelled as Integer constants with a unit annotation?"
+
+open question "Back-off algorithm: the standard specifies a random back-off whose range grows (0-7, 0-15, 0-31, 0-63) based on unacknowledged Logon Enable messages. Should this be modelled as a state machine on the Decoder entity (with a back_off_range field and transition rules), or is the exact algorithm below the domain boundary — with only the observable guarantee (statistical separability) modelled?"
+
+open question "Feedback channels as separate surfaces: channel 1 and channel 2 have distinct timing requirements (defined in S-9.3.2). Should they be modelled here as named output ports on a Decoder surface, or deferred entirely to S-9.3.2?"
+
+open question "Short GUI mandatory scope: Short GUI data space (2) is mandatory for Throttle UI interaction type but optional otherwise. Should interaction types be modelled as decoder capability modes that gate which contracts are active, or as separate decoder variant types?"
+
+open question "WriteBlock and ReadBlock as contracts vs rules: bulk transfer is a multi-step interaction (Write → ACK → progress feedback on subsequent packets). Should this be modelled as a stateful contract (with intermediate states: write_pending, write_complete) rather than single rules?"
+
+open question "Addressed Chained packet composition: chaining allows multiple S-9.2/S-9.2.1 instructions in one packet frame. Should this be modelled by factoring the individual instruction rules as reusable triggers that the chained packet rule invokes, or as a black-box 'process_each' function?"

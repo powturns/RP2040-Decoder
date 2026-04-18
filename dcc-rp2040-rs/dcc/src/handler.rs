@@ -1,13 +1,13 @@
-use crate::cv::store::{reset, Error as StoreError, StoreExt};
+use crate::cv::Cv;
 use crate::cv::store::Store;
+use crate::cv::store::{Error as StoreError, StoreExt, reset};
 use crate::handler::Op::{AcknowledgeCv, Reboot};
 use crate::transport::packet::{
     AdvancedOperationsInstruction, Error as PacketError, OperationModeInstruction, Packet,
     ServiceInstructionType, ServicePacket,
 };
-use crate::{FunctionGroupFlags, Timer, is_recipient, FunctionGroup, is_broadcast};
+use crate::{FunctionGroup, FunctionGroupFlags, Timer, is_broadcast, is_recipient};
 use motor::VelocitySetpoint;
-use crate::cv::Cv;
 
 const SERVICE_MODE_TIMEOUT: usize = 20;
 
@@ -47,7 +47,10 @@ where
     S: Store,
 {
     pub fn new(timer: T, store: S) -> Self {
-        Self { enter_service_mode_timer: timer, store }
+        Self {
+            enter_service_mode_timer: timer,
+            store,
+        }
     }
 
     /// Handles the packet, returning any operation that needs to be performed.
@@ -82,15 +85,22 @@ where
             OperationModeInstruction::AdvancedOperations(o) => match o {
                 AdvancedOperationsInstruction::SpeedStepControl(v) => Ok(Some(Op::Velocity128(v))),
             },
-            OperationModeInstruction::FunctionGroup(fg) => {
-                Ok(Some(Op::SetFunctions(fg)))
-            }
+            OperationModeInstruction::FunctionGroup(fg) => Ok(Some(Op::SetFunctions(fg))),
         }
     }
 
     fn handle_service_mode(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        // check for legacy reset packet
+        if packet.data.len() == 2 && packet.data[..2] == [0b01111111, 0b00001000] {
+            self.reset_to_factory_defaults()?;
+            return Ok(Some(Reboot));
+        }
+
         let packet_type = packet.instruction_type()?;
-        trace!("handle_service_mode: type={:?}, packet={:08b}", packet_type, packet.data);
+        trace!(
+            "handle_service_mode: type={:?}, packet={:08b}",
+            packet_type, packet.data
+        );
         match packet_type {
             ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet),
             ServiceInstructionType::VerifyByte => self.verify_byte(packet),
@@ -122,16 +132,14 @@ where
 
         let write = match Cv::try_from(address) {
             Ok(addr) => match addr {
-
                 // read only cvs
                 Cv::ManufacturerId => {
                     // Reset all CVs to default when setting CV_8 = 8)
                     if packet.cv_data()? == 8 {
-                        info!("Resetting all CVs to default");
-                        reset(&mut self.store)?;
+                        self.reset_to_factory_defaults()?;
+                        return Ok(Some(Reboot));
                     }
-
-                    return Ok(Some(Reboot));
+                    return Ok(None);
                 }
 
                 Cv::ManufacturerVersionNumber => {
@@ -143,18 +151,23 @@ where
                     return Ok(Some(Reboot));
                 }
 
-                _ => true
-            }
+                _ => true,
+            },
 
-            _ => true
+            _ => true,
         };
 
         if write {
-            self.store
-                .write_byte(address as usize, packet.cv_data()?)?;
+            self.store.write_byte(address as usize, packet.cv_data()?)?;
         }
 
         Ok(Some(AcknowledgeCv))
+    }
+
+    fn reset_to_factory_defaults(&mut self) -> Result<(), Error> {
+        info!("Resetting all CVs to default");
+        reset(&mut self.store)?;
+        Ok(())
     }
 
     fn manipulate_bit(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
@@ -231,21 +244,21 @@ mod tests {
     }
 
     fn service_verify_packet(cv_addr: u16, value: u8) -> Packet {
-        let cv_addr = cv_addr -1;
+        let cv_addr = cv_addr - 1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
         pkt(&[0x70 | (0b01 << 2) | addr_high, addr_low, value, 0x00])
     }
 
     fn service_write_packet(cv_addr: u16, value: u8) -> Packet {
-        let cv_addr = cv_addr -1;
+        let cv_addr = cv_addr - 1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
         pkt(&[0x70 | (0b11 << 2) | addr_high, addr_low, value, 0x00])
     }
 
     fn service_bit_verify_packet(cv_addr: u16, bit_pos: u8, bit_val: u8) -> Packet {
-        let cv_addr = cv_addr -1;
+        let cv_addr = cv_addr - 1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
         let data = 0b1110_0000 | (bit_val << 3) | bit_pos;
@@ -253,7 +266,7 @@ mod tests {
     }
 
     fn service_bit_write_packet(cv_addr: u16, bit_pos: u8, bit_val: u8) -> Packet {
-        let cv_addr = cv_addr -1;
+        let cv_addr = cv_addr - 1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
         let data = 0b1111_0000 | (bit_val << 3) | bit_pos;
@@ -350,7 +363,10 @@ mod tests {
         }
 
         fn read_cv(&self, addr: usize) -> u8 {
-            self.handler.store.read_byte(addr).expect("error reading cv")
+            self.handler
+                .store
+                .read_byte(addr)
+                .expect("error reading cv")
         }
     }
 
@@ -581,7 +597,7 @@ mod tests {
         for bit_pos in 0..8 {
             let packet = service_bit_write_packet(50, bit_pos, 1);
             let result = harness.handle(&packet);
-            assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
+            assert_eq!(result, Ok(Some(AcknowledgeCv)));
         }
 
         // All bits should be set
@@ -591,10 +607,21 @@ mod tests {
         for bit_pos in 0..8 {
             let packet = service_bit_write_packet(50, bit_pos, 0);
             let result = harness.handle(&packet);
-            assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
+            assert_eq!(result, Ok(Some(AcknowledgeCv)));
         }
 
         // All bits should be clear
         assert_eq!(harness.read_cv(50), 0x00);
+    }
+
+    #[test]
+    fn test_service_factory_defaults() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let packet = pkt(&[0b01111111, 0b00001000]);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(Reboot)));
     }
 }

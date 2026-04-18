@@ -1,5 +1,5 @@
 use crate::transport::{is_basic_address, is_mf_extended_address};
-use crate::{FunctionGroupFlags, read_extended_address, FunctionGroup};
+use crate::{FunctionGroup, FunctionGroupFlags, read_extended_address};
 use heapless::Vec;
 use int_enum::IntEnum;
 use motor::{Direction, SpeedStep, VelocitySetpoint};
@@ -317,17 +317,33 @@ mod tests {
 
         if let OperationModeInstruction::FunctionGroup(fg) = op_instr {
             // Test that the correct flags are set
-            assert!(fg.flags.contains(FunctionGroupFlags::F1), "F1 should be set");
-            assert!(fg.flags.contains(FunctionGroupFlags::F2), "F2 should be set");
-            assert!(!fg.flags.contains(FunctionGroupFlags::F3), "F3 should not be set");
-            assert!(!fg.flags.contains(FunctionGroupFlags::F4), "F4 should not be set");
-            assert!(fg.flags.contains(FunctionGroupFlags::FL), "FL should be set");
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::F1),
+                "F1 should be set"
+            );
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::F2),
+                "F2 should be set"
+            );
+            assert!(
+                !fg.flags.contains(FunctionGroupFlags::F3),
+                "F3 should not be set"
+            );
+            assert!(
+                !fg.flags.contains(FunctionGroupFlags::F4),
+                "F4 should not be set"
+            );
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::FL),
+                "FL should be set"
+            );
 
             // Test the group mask is correct
             assert_eq!(fg.group_mask, FunctionGroupFlags::FG_1);
 
             // Test the exact flag combination
-            let expected_flags = FunctionGroupFlags::F1 | FunctionGroupFlags::F2 | FunctionGroupFlags::FL;
+            let expected_flags =
+                FunctionGroupFlags::F1 | FunctionGroupFlags::F2 | FunctionGroupFlags::FL;
             assert_eq!(fg.flags, expected_flags);
         } else {
             panic!("Expected FunctionGroup");
@@ -349,10 +365,22 @@ mod tests {
 
         if let OperationModeInstruction::FunctionGroup(fg) = op_instr {
             // Test that the correct flags are set
-            assert!(fg.flags.contains(FunctionGroupFlags::F5), "F5 should be set");
-            assert!(!fg.flags.contains(FunctionGroupFlags::F6), "F6 should not be set");
-            assert!(fg.flags.contains(FunctionGroupFlags::F7), "F7 should be set");
-            assert!(!fg.flags.contains(FunctionGroupFlags::F8), "F8 should not be set");
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::F5),
+                "F5 should be set"
+            );
+            assert!(
+                !fg.flags.contains(FunctionGroupFlags::F6),
+                "F6 should not be set"
+            );
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::F7),
+                "F7 should be set"
+            );
+            assert!(
+                !fg.flags.contains(FunctionGroupFlags::F8),
+                "F8 should not be set"
+            );
 
             // Test the group mask is correct
             assert_eq!(fg.group_mask, FunctionGroupFlags::FG_2_1);
@@ -380,10 +408,22 @@ mod tests {
 
         if let OperationModeInstruction::FunctionGroup(fg) = op_instr {
             // Test that the correct flags are set
-            assert!(!fg.flags.contains(FunctionGroupFlags::F9), "F9 should not be set");
-            assert!(!fg.flags.contains(FunctionGroupFlags::F10), "F10 should not be set");
-            assert!(fg.flags.contains(FunctionGroupFlags::F11), "F11 should be set");
-            assert!(fg.flags.contains(FunctionGroupFlags::F12), "F12 should be set");
+            assert!(
+                !fg.flags.contains(FunctionGroupFlags::F9),
+                "F9 should not be set"
+            );
+            assert!(
+                !fg.flags.contains(FunctionGroupFlags::F10),
+                "F10 should not be set"
+            );
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::F11),
+                "F11 should be set"
+            );
+            assert!(
+                fg.flags.contains(FunctionGroupFlags::F12),
+                "F12 should be set"
+            );
 
             // Test the group mask is correct
             assert_eq!(fg.group_mask, FunctionGroupFlags::FG_2_0);

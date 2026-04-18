@@ -48,8 +48,7 @@ pub(crate) enum Cv {
     /// CV8 shall contain the NMRA assigned id number of the manufacturer of this decoder.
     ///
     /// Read only
-    ManufacturerId=8,
-
+    ManufacturerId = 8,
 
     /// PWM frequency in Hz = CV_9*100+10000
     MotorPwmFrequency = 9,
