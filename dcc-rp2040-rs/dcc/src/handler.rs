@@ -132,6 +132,22 @@ where
 
         let write = match Cv::try_from(address) {
             Ok(addr) => match addr {
+                Cv::PrimaryAddress => {
+                    let value = packet.cv_data()?;
+                    if !(1..=127).contains(&value) {
+                        // return an error if the value is not in the valid primary address
+                        // range
+                        return Err(PacketError::InvalidInstruction.into());
+                    }
+                    self.store.write_byte(Cv::PrimaryAddress as usize, value)?;
+
+                    // clear the extended address mode bit and consist addresses
+                    let cv29 = self.store.read_byte(Cv::DecoderConfiguration as usize)?;
+                    self.store.write_byte(Cv::DecoderConfiguration as usize, cv29 & !0b00100000)?;
+                    self.store.write_byte(Cv::ConsistAddress as usize, 0)?;
+                    return Ok(Some(AcknowledgeCv));
+                }
+
                 // read only cvs
                 Cv::ManufacturerId => {
                     // Reset all CVs to default when setting CV_8 = 8)
@@ -612,6 +628,32 @@ mod tests {
 
         // All bits should be clear
         assert_eq!(harness.read_cv(50), 0x00);
+    }
+
+    #[test]
+    fn test_service_write_address_only() {
+        let store = MockStore::new()
+            .with_cv(DecoderConfiguration as u16, 0b00100000) // CV29 bit 5 set (extended addressing)
+            .with_cv(19, 0x42); // CV19 consist address non-zero
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let packet = service_write_packet(1, 5);
+        let result = harness.handle(&packet);
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(1), 5); // CV1 updated
+        assert_eq!(harness.read_cv(29) & 0b00100000, 0); // CV29 bit 5 cleared
+        assert_eq!(harness.read_cv(19), 0); // CV19 cleared
+    }
+
+    #[test]
+    fn test_service_write_address_only_invalid_range() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        assert_eq!(harness.handle(&service_write_packet(1, 0)), Ok(None));
+        assert_eq!(harness.handle(&service_write_packet(1, 128)), Ok(None));
     }
 
     #[test]

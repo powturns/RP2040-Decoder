@@ -98,6 +98,7 @@ impl CvValue for u32 {
     }
 }
 
+// TODO: add a method for reading decoder configuration as a bitflags struct for easy access
 pub trait StoreExt {
     fn read_cv<V: CvValue>(&self, address: usize) -> Result<V, Error>;
 
