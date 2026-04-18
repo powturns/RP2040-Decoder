@@ -1,0 +1,275 @@
+-- allium: 3
+-- dcc-s9.2-communications.allium
+-- NMRA S-9.2: Communications Standards for Digital Command Control (July 2004)
+--
+-- Scope: Baseline DCC packet semantics for locomotive decoders
+-- Includes:
+--   General packet structure and validation rules
+--   Speed and Direction baseline packet
+--   Digital Decoder Reset, Idle and Broadcast Stop packets
+--   Packet transmission frequency requirements
+-- Excludes:
+--   Physical signal encoding (see S-9.1)
+--   Extended packet formats and long addresses (see RP-9.2.1)
+--   Service mode and CV programming (see RP-9.2.3)
+--   Accessory decoder packet types
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity CommandStation {
+    -- Originates and transmits DCC packets onto the track bitstream.
+    -- Responsible for preamble length and packet repetition rate.
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value ReceivedPacket {
+    address: Integer
+    instruction: Integer
+    error_byte: Integer
+
+    is_valid: error_byte = xor(address, instruction)
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Direction { forward | reverse }
+
+enum BroadcastStopMode { decelerate_to_stop | cut_motor_power }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity LocomotiveDecoder {
+    address: Integer        -- 1–127 for baseline short addressing
+    speed: stopped | e_stopped | moving
+    direction: Direction
+
+    transitions speed {
+        stopped -> moving
+        stopped -> e_stopped
+        e_stopped -> moving
+        e_stopped -> stopped
+        moving -> stopped
+        moving -> e_stopped
+        terminal:
+    }
+
+    -- step is only meaningful while the decoder is moving
+    step: Integer when speed = moving   -- 1–28 (Speed Step 1 through Step 28)
+
+    is_delivering_power: speed = moving or speed = stopped
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- Preamble bit counts (Section A)
+    min_preamble_bits_to_accept: Integer = 10
+    max_preamble_bits_to_require: Integer = 12
+    min_preamble_bits_to_send: Integer = 14
+
+    -- Timing constraints (Section C)
+    min_inter_packet_gap: Duration = 5.milliseconds
+    max_packet_interval: Duration = 30.milliseconds
+
+    -- Post-reset service mode hold (Section B)
+    post_reset_service_address_hold: Duration = 20.milliseconds
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- Decoder updates speed step and direction
+rule DecoderSetSpeedAndDirection {
+    when: SpeedDirectionPacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: step >= 1 and step <= 28
+
+    ensures: decoder.speed = moving
+    ensures: decoder.step = step
+    ensures: decoder.direction = direction
+}
+
+-- Decoder performs a graceful stop (motor decelerates; decoder may apply momentum)
+rule DecoderGracefulStop {
+    when: SpeedDirectionPacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: step = 0
+
+    ensures: decoder.speed = stopped
+}
+
+-- Decoder performs an emergency stop: immediately ceases delivering power to motor
+rule DecoderEmergencyStop {
+    when: SpeedDirectionPacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: step = -1  -- e-stop command encoding
+
+    ensures: decoder.speed = e_stopped
+}
+
+-- Decoder resets: erases volatile memory (speed, direction) and returns to power-up state
+rule DecoderReceivesReset {
+    when: ResetPacketReceived(decoder, packet)
+
+    requires: packet.is_valid
+
+    ensures: decoder.speed = stopped
+
+    @guidance
+        -- All three bytes of a Reset Packet are 0x00.
+        -- After reset, the command station must not transmit packets with
+        -- address bytes in range 0x64–0x7F for at least 20 ms, unless
+        -- entering service mode (RP-9.2.3).
+        -- This 20 ms hold constraint applies to the CommandStation, not to
+        -- the decoder itself.
+}
+
+-- Decoder receives idle packet: no new action is taken
+rule DecoderReceivesIdle {
+    when: IdlePacketReceived(decoder, packet)
+
+    requires: packet.is_valid
+    -- The decoder acts as if the packet were addressed to a different decoder.
+    -- No state change occurs.
+}
+
+-- Broadcast stop: all motor decoders bring locomotive to a stop
+rule DecoderBroadcastStop {
+    when: BroadcastStopPacketReceived(decoder, mode, packet)
+
+    requires: packet.is_valid
+    requires: mode = decelerate_to_stop
+
+    ensures: decoder.speed = stopped
+}
+
+-- Broadcast stop: all motor decoders immediately cease delivering energy to motor
+rule DecoderBroadcastCutPower {
+    when: BroadcastStopPacketReceived(decoder, mode, packet)
+
+    requires: packet.is_valid
+    requires: mode = cut_motor_power
+
+    ensures: decoder.speed = e_stopped
+}
+
+-- Decoder discards a packet with an invalid error detection byte
+rule DecoderRejectsInvalidPacket {
+    when: PacketReceived(decoder, packet)
+
+    requires: not packet.is_valid
+    -- Decoder ignores the packet entirely and waits for the next valid preamble.
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant BaselineAddressRange {
+    for d in LocomotiveDecoders:
+        d.address >= 1 and d.address <= 127
+}
+
+invariant SpeedStepRange {
+    for d in LocomotiveDecoders:
+        d.speed = moving implies d.step >= 1 and d.step <= 28
+}
+
+invariant ReservedAddressesNotTransmittedInNormalOperation {
+    -- Address 0x00 (00000000), 0xFE (11111110), and 0xFF (11111111) are reserved.
+    -- They may only be used for Reset, Idle, and Broadcast Stop packets as defined here.
+    for p in ReceivedPackets:
+        p.address != 254 and p.address != 255
+}
+
+------------------------------------------------------------
+-- Actor Declarations
+------------------------------------------------------------
+
+actor MotorController {
+    identified_by: LocomotiveDecoder where is_delivering_power
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface LocomotiveControl {
+    facing station: CommandStation
+
+    contracts:
+        demands PacketDelivery
+
+    @guarantee AddressFiltering
+        -- A decoder only acts on packets carrying its own address,
+        -- or on broadcast packets (Reset, Idle, Broadcast Stop).
+
+    @guarantee ErrorDetectionEnforced
+        -- Decoders reject any packet where the error detection byte
+        -- does not equal the bitwise XOR of the address byte and the
+        -- instruction byte.
+
+    @guarantee PreambleWindow
+        -- A decoder must accept any valid preamble of 10 or more "1" bits.
+        -- A decoder must not require more than 12 "1" bits to accept a preamble.
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract PacketDelivery {
+    deliver: (packet: ReceivedPacket) -> Unit
+
+    @invariant RepetitionRate
+        -- Packets must be repeated as frequently as possible.
+        -- The command station must be configurable to transmit at least
+        -- one complete packet within every 30 ms window (measured between
+        -- Packet Start Bits).
+
+    @invariant InterPacketGap
+        -- A decoder can process multiple addressed packets provided the
+        -- gap between the Packet End Bit of one and the Packet Start Bit
+        -- of the next is at least 5 ms.
+        -- Note: addresses 112–127 must not receive two identical packets
+        -- within 5 ms (older decoders may interpret them as service mode).
+
+    @guidance
+        -- Power may be removed from the track between the Packet End Bit
+        -- and the next preamble to allow alternative command control formats.
+        -- Alternative command control formats are permitted in this gap.
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred ExtendedPacketFormats.decode   -- see: dcc-rp-9.2.1-extended-packets.allium
+deferred ServiceMode.program            -- see: dcc-rp-9.2.3-service-mode.allium
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "E-stop encoding: the spec uses bit pattern CS=00001 for e-stop. Should this be modelled as step=-1 (sentinel) or as a separate trigger variant distinct from speed step commands?"
+open question "The 'direction may be ignored' flag on Broadcast Stop (C bit): should this be a precondition exemption on direction-sensitive function rules, or a separate decoder capability flag?"
+open question "Automatic analog conversion (Section C): should analog fallback be modelled as a separate decoder variant or as a configurable surface that the decoder can optionally present?"
+open question "The 28-step to 14-step backwards-compatibility mode (C bit as headlight in RP-9.2.1): where does the boundary between this spec and RP-9.2.1 fall for the C bit interpretation?"

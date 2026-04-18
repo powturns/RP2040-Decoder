@@ -1,0 +1,597 @@
+-- allium: 3
+-- dcc-s9.2.1-extended-packet-formats.allium
+-- NMRA S-9.2.1: DCC Extended Packet Formats (January 24, 2025)
+--
+-- Scope: Extended packet format semantics for multi-function and accessory decoders
+-- Includes:
+--   Address partitions (§2.1)
+--   Multi-function decoder: 14/28/128 speed steps (§2.3.2–2.3.3)
+--   Multi-function decoder: functions FL–F68 (§2.3.4–2.3.6)
+--   Multi-function decoder: consist control (§2.3.1.4)
+--   Multi-function decoder: decoder control / reset / addressing mode (§2.3.1.1–2.3.1.2)
+--   Multi-function decoder: binary state control (§2.3.6.1, §2.3.6.4)
+--   Feature expansion: model time/date and system time broadcast (§2.3.6.2–2.3.6.3)
+--   Accessory decoder: basic output pair and extended aspect control (§2.4.1–2.4.2)
+--   Operations mode acknowledgment reference (§2.5)
+-- Excludes:
+--   Configuration Variable definitions and semantics (see S-9.2.2)
+--   Service mode programming (see S-9.2.3)
+--   Bi-directional communications protocol (see S-9.3.2)
+--   Advanced extended packet formats / XPOM details (see S-9.2.1.1)
+--   Analog conversion fallback mode
+--   Appendix A legacy accessory CV access (discouraged in new designs)
+
+------------------------------------------------------------
+-- External Entities
+------------------------------------------------------------
+
+external entity CommandStation {
+    -- Originates and transmits DCC extended packets onto the track.
+}
+
+------------------------------------------------------------
+-- Value Types
+------------------------------------------------------------
+
+value ReceivedPacket {
+    address: Integer
+    instruction: Integer
+    error_byte: Integer
+
+    is_valid: error_byte = xor(address, instruction)
+}
+
+value ModelTime {
+    hours: Integer          -- 0–23
+    minutes: Integer        -- 0–59
+    day_of_week: Integer    -- 0=Monday … 6=Sunday
+    acceleration: Integer   -- 0=stopped, 1=real-time, 2=2×real-time, …
+    significant_change: Boolean
+}
+
+value ModelDate {
+    day: Integer    -- 1–31
+    month: Integer  -- 1–12
+    year: Integer   -- 0–4095
+}
+
+------------------------------------------------------------
+-- Enumerations
+------------------------------------------------------------
+
+enum Direction { forward | reverse }
+
+enum AddressMode { short_7bit | long_14bit }
+
+enum SpeedMode { steps_14 | steps_28 | steps_128 }
+
+------------------------------------------------------------
+-- Entities
+------------------------------------------------------------
+
+entity MultiFunctionDecoder {
+    -- Primary address; valid range depends on address_mode
+    address: Integer
+    address_mode: AddressMode
+    speed_mode: SpeedMode
+
+    -- Motion state
+    speed: stopped | e_stopped | moving
+    direction: Direction
+
+    transitions speed {
+        stopped -> moving
+        stopped -> e_stopped
+        e_stopped -> moving
+        e_stopped -> stopped
+        moving -> stopped
+        moving -> e_stopped
+        terminal:
+    }
+
+    -- step is only present while moving; range depends on speed_mode
+    step: Integer when speed = moving
+
+    -- Consist (null fields = not in a consist)
+    consist_address: Integer?   -- 1–127 when active
+    consist_reversed: Boolean?  -- true = reversed orientation within the consist
+
+    -- Functions: 0 = FL (headlight), 1–68 = F1–F68
+    active_functions: Set<Integer>
+
+    -- Binary states: 1–32767 (not refreshed; non-volatile storage recommended)
+    active_binary_states: Set<Integer>
+
+    -- Derived
+    in_consist: consist_address != null
+
+    -- Speed and direction commands use the consist address when active;
+    -- function commands always use the decoder's own address.
+    effective_speed_address: consist_address ?? address
+
+    function_on(n): n in active_functions
+    binary_state_on(n): n in active_binary_states
+}
+
+entity AccessoryDecoder {
+    address: Integer   -- 1–2044 (user-visible)
+    kind: BasicAccessoryDecoder | ExtendedAccessoryDecoder
+}
+
+variant BasicAccessoryDecoder : AccessoryDecoder {
+    -- Two paired outputs share one address, distinguished by the R (paired state) bit
+    output_a: Boolean   -- R=0: diverging / left / stop signal
+    output_b: Boolean   -- R=1: normal / right / proceed signal
+}
+
+variant ExtendedAccessoryDecoder : AccessoryDecoder {
+    -- Signal head aspect or time-controlled output
+    aspect: Integer   -- 0–255 (0 = absolute stop; all others are system-defined)
+}
+
+------------------------------------------------------------
+-- Config
+------------------------------------------------------------
+
+config {
+    -- After a soft or hard reset, command station must not send to addresses
+    -- 112–127 for this many packet times (to prevent service mode confusion)
+    post_reset_hold_packet_count: Integer = 10
+}
+
+------------------------------------------------------------
+-- Rules
+------------------------------------------------------------
+
+-- ── Speed and Direction: 14-step and 28-step modes ───────────────────────────
+
+rule MultiFunctionSetSpeed {
+    when: SpeedDirectionPacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.effective_speed_address
+    requires: decoder.speed_mode in {steps_14, steps_28}
+    requires: step >= 1
+
+    ensures: decoder.speed = moving
+    ensures: decoder.step = step
+    ensures: decoder.direction = direction
+
+    @guidance
+        -- If CV29 bit 1 = 1 (28-step mode), bit 4 of the instruction is an
+        -- intermediate speed bit (as in S-9.2 baseline). If CV29 bit 1 = 0
+        -- (14-step mode), bit 4 controls FL instead.
+        -- When a new step is within one step of the current step, the decoder
+        -- may optionally select the halfway intermediate value.
+}
+
+rule MultiFunctionGracefulStop {
+    when: SpeedDirectionPacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.effective_speed_address
+    requires: decoder.speed_mode in {steps_14, steps_28}
+    requires: step = 0
+
+    ensures: decoder.speed = stopped
+}
+
+rule MultiFunctionEmergencyStop {
+    when: SpeedDirectionPacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.effective_speed_address
+    requires: decoder.speed_mode in {steps_14, steps_28}
+    requires: step = -1   -- e-stop command
+
+    ensures: decoder.speed = e_stopped
+}
+
+-- ── 128 Speed Step Control (CCC=001, GGGGG=11111) ───────────────────────────
+
+rule MultiFunctionSetSpeed128 {
+    when: SpeedStep128PacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.effective_speed_address
+    requires: step >= 1 and step <= 126
+
+    ensures: decoder.speed = moving
+    ensures: decoder.speed_mode = steps_128
+    ensures: decoder.step = step
+    ensures: decoder.direction = direction
+}
+
+rule MultiFunctionGracefulStop128 {
+    when: SpeedStep128PacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.effective_speed_address
+    requires: step = 0
+
+    ensures: decoder.speed = stopped
+    ensures: decoder.speed_mode = steps_128
+}
+
+rule MultiFunctionEmergencyStop128 {
+    when: SpeedStep128PacketReceived(decoder, step, direction, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.effective_speed_address
+    requires: step = -1
+
+    ensures: decoder.speed = e_stopped
+    ensures: decoder.speed_mode = steps_128
+}
+
+-- ── Function Group One: FL, F1–F4 (CCC=100) ─────────────────────────────────
+
+rule MultiFunctionSetFunctionGroupOne {
+    when: FunctionGroupOnePacketReceived(decoder, fl, f1, f2, f3, f4, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+
+    ensures: decoder.active_functions = apply_function_group(
+        decoder.active_functions, {0: fl, 1: f1, 2: f2, 3: f3, 4: f4}
+    )
+
+    @guidance
+        -- Any function in this group may be directionally qualified: a decoder
+        -- may behave differently for forward vs reverse travel, as configured
+        -- by CVs (see S-9.2.2). This applies equally to Function Group Two.
+}
+
+-- ── Function Group Two: F5–F8 or F9–F12 (CCC=101) ───────────────────────────
+
+rule MultiFunctionSetFunctionGroupTwoHigh {
+    when: FunctionGroupTwoPacketReceived(decoder, s_bit, f5, f6, f7, f8, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: s_bit = true    -- S=1: selects F5–F8
+
+    ensures: decoder.active_functions = apply_function_group(
+        decoder.active_functions, {5: f5, 6: f6, 7: f7, 8: f8}
+    )
+}
+
+rule MultiFunctionSetFunctionGroupTwoLow {
+    when: FunctionGroupTwoPacketReceived(decoder, s_bit, f9, f10, f11, f12, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: s_bit = false   -- S=0: selects F9–F12
+
+    ensures: decoder.active_functions = apply_function_group(
+        decoder.active_functions, {9: f9, 10: f10, 11: f11, 12: f12}
+    )
+}
+
+-- ── Feature Expansion: F13–F68 (CCC=110) ────────────────────────────────────
+-- Eight functions per sub-instruction. The pattern is identical for all groups;
+-- first_function identifies the lowest-numbered function in the group.
+-- Groups: 13, 21, 29, 37, 45, 53, 61 (covering F13–F20 through F61–F68).
+
+rule MultiFunctionSetExpandedFunctions {
+    when: FunctionExpansionPacketReceived(decoder, first_function, function_byte, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: first_function in {13, 21, 29, 37, 45, 53, 61}
+
+    ensures: decoder.active_functions = apply_function_byte(
+        decoder.active_functions, first_function, function_byte
+    )
+
+    @guidance
+        -- function_byte is an 8-bit mask: bit 0 maps to first_function,
+        -- bit 7 maps to first_function + 7. A '1' means the function is on.
+        -- Command stations not refreshing these groups must send at least
+        -- two repetitions when a function state changes.
+        -- Non-volatile storage of these function states is recommended.
+}
+
+-- ── Binary State Control (short form: 1–127; long form: 1–32767) ─────────────
+
+rule MultiFunctionSetBinaryState {
+    when: BinaryStatePacketReceived(decoder, state_number, active, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: state_number >= 1
+
+    ensures:
+        if active:
+            decoder.active_binary_states = decoder.active_binary_states + {state_number}
+        else:
+            decoder.active_binary_states = decoder.active_binary_states - {state_number}
+
+    @guidance
+        -- Binary state packets are never refreshed by the command station.
+        -- Non-volatile storage is recommended.
+        -- Binary states 1–15 are reserved for S-9.3.2 bi-directional communication.
+        -- Decoders supporting the long form (states 1–32767) must also support
+        -- the short form (states 1–127).
+}
+
+rule MultiFunctionClearAllBinaryStates {
+    when: BinaryStatePacketReceived(decoder, state_number, active, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: state_number = 0    -- broadcast address: applies to all states
+    requires: not active
+
+    ensures: decoder.active_binary_states = {}
+}
+
+-- ── Model Time Broadcast (CCC=110, GGGGG=00001, CC=00) ───────────────────────
+
+rule MultiFunctionReceivesModelTime {
+    when: ModelTimePacketReceived(time, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = 0   -- always sent to broadcast address 0
+
+    @guidance
+        -- Transmitted at most once per model minute. Skipped or missing updates
+        -- must be tolerated; decoders may interpolate using the acceleration factor.
+        -- The update_flag (U bit) signals a significant time jump.
+        -- The command station may skip this packet when bandwidth is limited.
+}
+
+rule MultiFunctionReceivesModelDate {
+    when: ModelDatePacketReceived(date, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = 0
+
+    @guidance
+        -- Transmitted at least three times when the date changes.
+        -- Decoders must tolerate missing date commands.
+}
+
+-- ── Consist Control (CCC=000, CCCG=0001) ────────────────────────────────────
+
+rule MultiFunctionSetConsistNormal {
+    when: ConsistControlPacketReceived(decoder, consist_address, reversed, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: consist_address >= 1 and consist_address <= 127
+    requires: not reversed
+
+    ensures: decoder.consist_address = consist_address
+    ensures: decoder.consist_reversed = false
+}
+
+rule MultiFunctionSetConsistReversed {
+    when: ConsistControlPacketReceived(decoder, consist_address, reversed, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: consist_address >= 1 and consist_address <= 127
+    requires: reversed
+
+    ensures: decoder.consist_address = consist_address
+    ensures: decoder.consist_reversed = true
+}
+
+rule MultiFunctionDeactivateConsist {
+    when: ConsistControlPacketReceived(decoder, consist_address, reversed, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: consist_address = 0   -- address 0 = deactivate consist
+
+    ensures: decoder.consist_address = null
+    ensures: decoder.consist_reversed = null
+}
+
+-- ── Decoder Control: Soft Reset (CCC=000, CCCG=0000, TTT=000, F=0) ──────────
+
+rule MultiFunctionSoftReset {
+    when: DecoderControlPacketReceived(decoder, ttt, hard_reset, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: ttt = 0 and not hard_reset
+
+    ensures: decoder.speed = stopped
+    ensures: decoder.active_functions = {}
+
+    @guidance
+        -- Erases all volatile memory: speed, direction, function state.
+        -- Command station must not send to addresses 112–127 for
+        -- config.post_reset_hold_packet_count packet times after this reset,
+        -- unless entering service mode (S-9.2.3).
+}
+
+-- ── Decoder Control: Hard Reset (CCC=000, CCCG=0000, TTT=000, F=1) ──────────
+
+rule MultiFunctionHardReset {
+    when: DecoderControlPacketReceived(decoder, ttt, hard_reset, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: ttt = 0 and hard_reset
+
+    ensures: decoder.speed = stopped
+    ensures: decoder.active_functions = {}
+    ensures: decoder.consist_address = null
+    ensures: decoder.consist_reversed = null
+    ensures: decoder.address_mode = short_7bit
+
+    @guidance
+        -- Resets CV29, CV31, CV32 to factory defaults and CV19 to 0x00,
+        -- then performs a soft reset. Restores out-of-box addressing state.
+}
+
+-- ── Decoder Control: Set Addressing Mode (CCC=000, CCCG=0000, TTT=101) ──────
+
+rule MultiFunctionSetAddressingMode {
+    when: SetAddressingModePacketReceived(decoder, use_long_address, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+
+    ensures: decoder.address_mode = if use_long_address: long_14bit else: short_7bit
+
+    @guidance
+        -- Sets CV29 bit 5. Long address is stored in CV17 and CV18; short in CV1.
+        -- CV17 must be in range 192–231 (0xC0–0xE7) for a valid long address.
+        -- CV17 and CV18 should be written atomically to avoid intermediate states.
+}
+
+-- ── Accessory Decoder: Basic Output Pair (§2.4.1) ───────────────────────────
+
+rule BasicAccessoryOutputControl {
+    when: BasicAccessoryPacketReceived(decoder, output, activate, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: decoder.kind = BasicAccessoryDecoder
+
+    ensures:
+        if output = 0:
+            decoder.output_a = activate
+        else:
+            decoder.output_b = activate
+
+    @guidance
+        -- Duration of activation (for momentary devices) is controlled by
+        -- CVs #515–518. If the intended on-duration is ≤ the configured
+        -- duration, no deactivation packet is needed.
+}
+
+-- ── Accessory Decoder: Extended Aspect Control (§2.4.2) ─────────────────────
+
+rule ExtendedAccessoryAspectControl {
+    when: ExtendedAccessoryPacketReceived(decoder, aspect, packet)
+
+    requires: packet.is_valid
+    requires: packet.address = decoder.address
+    requires: decoder.kind = ExtendedAccessoryDecoder
+
+    ensures: decoder.aspect = aspect
+
+    @guidance
+        -- Aspect 0 (0x00) is the absolute stop aspect.
+        -- All other aspect values are defined by the signalling system being modelled.
+        -- When used for time-based output control, the third byte encodes output
+        -- number and on-duration in 100 ms increments (0x7F = continuous).
+}
+
+------------------------------------------------------------
+-- Invariants
+------------------------------------------------------------
+
+invariant ShortAddressRange {
+    for d in MultiFunctionDecoders:
+        d.address_mode = short_7bit implies d.address >= 1 and d.address <= 127
+}
+
+invariant LongAddressRange {
+    for d in MultiFunctionDecoders:
+        d.address_mode = long_14bit implies d.address >= 1 and d.address <= 10239
+}
+
+invariant SpeedStepBounds {
+    for d in MultiFunctionDecoders:
+        d.speed = moving implies (
+            (d.speed_mode = steps_14  implies d.step >= 1 and d.step <= 14)  and
+            (d.speed_mode = steps_28  implies d.step >= 1 and d.step <= 28)  and
+            (d.speed_mode = steps_128 implies d.step >= 1 and d.step <= 126)
+        )
+}
+
+invariant FunctionNumberBounds {
+    for d in MultiFunctionDecoders:
+        d.active_functions.all(f => f >= 0 and f <= 68)
+}
+
+invariant BinaryStateBounds {
+    for d in MultiFunctionDecoders:
+        d.active_binary_states.all(s => s >= 1 and s <= 32767)
+}
+
+invariant ConsistAddressBounds {
+    for d in MultiFunctionDecoders:
+        d.in_consist implies d.consist_address >= 1 and d.consist_address <= 127
+}
+
+invariant ConsistOrientationPresent {
+    for d in MultiFunctionDecoders:
+        d.in_consist implies d.consist_reversed != null
+}
+
+invariant AccessoryAddressBounds {
+    for d in AccessoryDecoders:
+        d.address >= 1 and d.address <= 2044
+}
+
+invariant AspectBounds {
+    for d in AccessoryDecoders:
+        d.kind = ExtendedAccessoryDecoder implies d.aspect >= 0 and d.aspect <= 255
+}
+
+------------------------------------------------------------
+-- Surfaces
+------------------------------------------------------------
+
+surface MultiFunctionDecoderInterface {
+    facing station: CommandStation
+
+    contracts:
+        demands OperationsModeAcknowledgment
+
+    @guarantee ConsistSpeedFiltering
+        -- When a consist is active, a decoder ignores speed and direction commands
+        -- addressed to its own address. It responds only to those addressed to
+        -- the consist address. Function commands always use the decoder's own address.
+
+    @guarantee UnknownInstructionsTolerated
+        -- Decoders silently ignore instruction bytes they do not recognise.
+        -- Manufacturers must document which instructions their decoder implements.
+
+    @guarantee AddressModeExclusivity
+        -- A decoder with long (14-bit) addressing active does not respond to
+        -- 7-bit addressed speed/direction packets, and vice versa.
+}
+
+------------------------------------------------------------
+-- Contracts
+------------------------------------------------------------
+
+contract OperationsModeAcknowledgment {
+    acknowledge: (decoder: MultiFunctionDecoder) -> Unit
+
+    @invariant OnlyValidMechanism
+        -- The S-9.3.2 bi-directional mechanism is the only valid operations-mode
+        -- acknowledgment. No other form of acknowledgment is valid in operations mode.
+
+    @guidance
+        -- Acknowledgment is triggered when the decoder has acknowledgment enabled
+        -- (via CV or the Decoder Acknowledgment Request instruction TTT=111) and
+        -- receives a packet that requests acknowledgment.
+}
+
+------------------------------------------------------------
+-- Deferred Specifications
+------------------------------------------------------------
+
+deferred ConfigurationVariables.access   -- see: dcc-s9.2.2-configuration-variables.allium
+deferred BiDirectionalAcknowledgment.respond  -- see: dcc-s9.3.2-bidirectional.allium
+deferred AdvancedExtendedFormats.decode  -- see: dcc-s9.2.1.1-advanced-extended.allium
+
+------------------------------------------------------------
+-- Open Questions
+------------------------------------------------------------
+
+open question "apply_function_group and apply_function_byte are modelled as black box functions — should they be replaced with explicit set arithmetic, or is the black box sufficient at this abstraction level?"
+open question "Directional function qualification (footnotes 2 and 3): should this be a separate rule variant or a decoder capability flag configured via CV (and thus deferred to S-9.2.2)?"
+open question "A 128-step control packet sets speed_mode = steps_128 — should receiving a 28-step packet after that revert speed_mode to steps_28, or is the mode transition a one-way CV change?"
+open question "Consist address also enables Function Group 1/2 to respond on the consist address when CV21/CV22 bits are set — should this be modelled here or deferred to S-9.2.2?"
+open question "Binary states 1–15 are reserved for S-9.3.2 bi-directional communication — should this be enforced as an invariant in this spec or as a contract in the bi-directional spec?"
+open question "The Analog Function Group instruction (GGGGG=11101) for volume control: should this be modelled as a separate rule or included in the expanded function rules? The spec states it must not be used for speed control."

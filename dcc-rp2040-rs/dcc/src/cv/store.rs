@@ -30,7 +30,7 @@ impl core::fmt::Display for Error {
     fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
         match self {
             Error::Io => write!(f, "IO error"),
-            Error::InvalidAddress => write!(f, "Invalid Address")
+            Error::InvalidAddress => write!(f, "Invalid Address"),
         }
     }
 }
@@ -62,7 +62,7 @@ pub trait Store {
     fn write_bytes(&mut self, address: usize, value: &[u8], force: bool) -> Result<(), Error>;
 }
 
-pub trait CvValue:Sized {
+pub trait CvValue: Sized {
     const SIZE: usize;
 
     fn from_store(store: &impl Store, address: usize) -> Result<Self, Error>;
@@ -148,7 +148,7 @@ pub trait StoreExt {
     fn emf_adc_offset(&self) -> Result<Option<u8>, Error>;
 
     fn emf_adc_offset_clear(&mut self) -> Result<(), Error>;
-    
+
     fn write_emf_adc_offset(&mut self, offset: u8) -> Result<(), Error>;
 
     fn motor_pwm_divider(&self) -> Result<u8, Error>;
@@ -162,7 +162,11 @@ pub trait StoreExt {
     ///
     /// The returned value is a mask representing ALL GPIO pins. Bits that are `1` in the mask
     /// should be enabled when the function is active.
-    fn function_output_mask(&self, function_index: u8, direction: Direction) -> Result<Option<u32>, Error>;
+    fn function_output_mask(
+        &self,
+        function_index: u8,
+        direction: Direction,
+    ) -> Result<Option<u32>, Error>;
 
     /// Returns the PWM configuration for the requested slice.
     ///
@@ -171,7 +175,6 @@ pub trait StoreExt {
 }
 
 impl<T: Store> StoreExt for T {
-
     fn read_cv<V: CvValue>(&self, address: usize) -> Result<V, Error> {
         V::from_store(self, address)
     }
@@ -179,7 +182,9 @@ impl<T: Store> StoreExt for T {
     fn addr(&self) -> Result<u16, Error> {
         // check if we are an extended address
         if 0b00100000 & self.read_byte(DecoderConfiguration as usize)? != 0 {
-            return Ok(read_extended_address(self.read_bytes(ExtendedAddressMsb as usize, 2)?));
+            return Ok(read_extended_address(
+                self.read_bytes(ExtendedAddressMsb as usize, 2)?,
+            ));
         }
 
         Ok(self.read_byte(PrimaryAddress as usize)? as u16)
@@ -206,7 +211,9 @@ impl<T: Store> StoreExt for T {
     }
 
     fn pid_sample_time(&self) -> Result<Duration, Error> {
-        Ok(Duration::from_millis(self.read_byte(PidSampleTime as usize)? as u64))
+        Ok(Duration::from_millis(
+            self.read_byte(PidSampleTime as usize)? as u64,
+        ))
     }
 
     fn pid_ki(&self) -> Result<f32, Error> {
@@ -218,7 +225,9 @@ impl<T: Store> StoreExt for T {
     }
 
     fn pid_filter_tc(&self) -> Result<Duration, Error> {
-        Ok(Duration::from_millis(self.read_byte(PidFilterTc as usize)? as u64))
+        Ok(Duration::from_millis(
+            self.read_byte(PidFilterTc as usize)? as u64
+        ))
     }
 
     fn pid_kp_gain_range1_end(&self) -> Result<f32, Error> {
@@ -242,7 +251,9 @@ impl<T: Store> StoreExt for T {
     }
 
     fn emf_measurement_delay(&self) -> Result<Duration, Error> {
-        Ok(Duration::from_micros(self.read_byte(EmfMsrDelay as usize)? as u64))
+        Ok(Duration::from_micros(
+            self.read_byte(EmfMsrDelay as usize)? as u64
+        ))
     }
 
     fn emf_l_side_cutoff(&self) -> Result<u8, Error> {
@@ -279,14 +290,20 @@ impl<T: Store> StoreExt for T {
     }
 
     fn speed_step_period(&self) -> Result<Duration, Error> {
-        Ok(Duration::from_millis(self.read_byte(SpeedStepPeriod as usize)? as u64))
+        Ok(Duration::from_millis(
+            self.read_byte(SpeedStepPeriod as usize)? as u64,
+        ))
     }
 
     fn pwm_enabled_mask(&self) -> Result<u32, Error> {
         self.read_cv::<u32>(EnablePwmOutputMask as usize)
     }
 
-    fn function_output_mask(&self, function_index: u8, direction: Direction) -> Result<Option<u32>, Error> {
+    fn function_output_mask(
+        &self,
+        function_index: u8,
+        direction: Direction,
+    ) -> Result<Option<u32>, Error> {
         if function_index >= 32 {
             return Ok(None);
         }
@@ -295,7 +312,8 @@ impl<T: Store> StoreExt for T {
             Direction::Forward => 0,
             Direction::Reverse => FUNCTION_MAP_DIR_OFFSET,
         };
-        let cv_start = FUNCTION_MAP_BASE + (function_index as usize * FUNCTION_MAP_STRIDE) + dir_offset;
+        let cv_start =
+            FUNCTION_MAP_BASE + (function_index as usize * FUNCTION_MAP_STRIDE) + dir_offset;
         Ok(Some(self.read_cv::<u32>(cv_start)?))
     }
 
