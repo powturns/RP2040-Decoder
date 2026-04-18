@@ -62,6 +62,10 @@ pub(crate) enum Cv {
     /// The least significant 8 bits of the extended address.
     ExtendedAddressLsb = 18,
 
+    /// The consist address. When non-zero, the decoder responds to this address in addition
+    /// to its primary address. Cleared when a new short address is written via Address-Only Write.
+    ConsistAddress = 19,
+
     /// CV29 — Decoder Configuration bit flags:
     /// - Bit 0: Locomotive direction. 0 = normal, 1 = reversed. Affects digital mode only; directional functions (e.g., FL/FR) follow the new forward direction.
     /// - Bit 1: FL control location. 0 = Speed/Direction (bit 4) controls FL; 1 = Function Group 1 (bit 4) controls FL.
