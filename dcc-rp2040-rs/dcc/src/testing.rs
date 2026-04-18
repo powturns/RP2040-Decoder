@@ -1,8 +1,8 @@
+use alloc::format;
 use crate::Timer;
 use crate::cv::CV_SIZE;
 use crate::cv::store::{Error, Store};
 use crate::transport::packet::Packet;
-use alloc::format;
 use core::any::type_name;
 use heapless::Vec;
 
@@ -38,20 +38,20 @@ impl MockStore {
 }
 
 impl Store for MockStore {
-    fn read_byte(&self, cv_id: usize) -> u8 {
+    fn read_byte(&self, cv_id: usize) -> Result<u8, Error> {
         if (cv_id as usize) < CV_SIZE {
-            self.cvs[cv_id as usize]
+            Ok(self.cvs[cv_id as usize])
         } else {
-            0
+            Ok(0)
         }
     }
 
-    fn read_bytes(&self, start: usize, len: usize) -> &[u8] {
+    fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
         let start_idx = start as usize;
         if start_idx < CV_SIZE && start_idx + len <= CV_SIZE {
-            &self.cvs[start_idx..start_idx + len]
+            Ok(&self.cvs[start_idx..start_idx + len])
         } else {
-            &[]
+            Ok(&[])
         }
     }
 
@@ -64,7 +64,7 @@ impl Store for MockStore {
         }
     }
 
-    fn write_bytes(&mut self, start: usize, value: &[u8]) -> Result<(), Error> {
+    fn write_bytes(&mut self, start: usize, value: &[u8], force: bool) -> Result<(), Error> {
         let start_idx = start as usize;
         if start_idx < CV_SIZE && start_idx + value.len() <= CV_SIZE {
             self.cvs[start_idx..start_idx + value.len()].copy_from_slice(value);

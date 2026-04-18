@@ -116,7 +116,6 @@ assign_resources! {
 // static EXECUTOR1: StaticCell<Executor> = StaticCell::new();
 
 // TODO: if we start sending larger packets, consider using https://github.com/embassy-rs/embassy/blob/main/examples/rp/src/bin/zerocopy.rs
-// FIXME: use a PubSubChannel instead of a channel so we can evict the oldest value if we cannot process them fast enough
 static PACKET_CHANNEL: PubSubChannel<ThreadModeRawMutex, Packet, 5, 1, 0> = PubSubChannel::new();
 
 static MOTOR_CHANNEL: Channel<ThreadModeRawMutex, motor::Command, 5> = Channel::new();

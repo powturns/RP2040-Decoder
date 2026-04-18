@@ -231,29 +231,33 @@ mod tests {
     }
 
     fn service_verify_packet(cv_addr: u16, value: u8) -> Packet {
+        let cv_addr = cv_addr -1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
-        pkt(&[0x70 | (0b01 << 3) | addr_high, addr_low, value, 0x00])
+        pkt(&[0x70 | (0b01 << 2) | addr_high, addr_low, value, 0x00])
     }
 
     fn service_write_packet(cv_addr: u16, value: u8) -> Packet {
+        let cv_addr = cv_addr -1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
-        pkt(&[0x70 | (0b11 << 3) | addr_high, addr_low, value, 0x00])
+        pkt(&[0x70 | (0b11 << 2) | addr_high, addr_low, value, 0x00])
     }
 
     fn service_bit_verify_packet(cv_addr: u16, bit_pos: u8, bit_val: u8) -> Packet {
+        let cv_addr = cv_addr -1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
         let data = 0b1110_0000 | (bit_val << 3) | bit_pos;
-        pkt(&[0x70 | (0b10 << 3) | addr_high, addr_low, data, 0x00])
+        pkt(&[0x70 | (0b10 << 2) | addr_high, addr_low, data, 0x00])
     }
 
     fn service_bit_write_packet(cv_addr: u16, bit_pos: u8, bit_val: u8) -> Packet {
+        let cv_addr = cv_addr -1;
         let addr_high = ((cv_addr >> 8) & 0x03) as u8;
         let addr_low = (cv_addr & 0xFF) as u8;
         let data = 0b1111_0000 | (bit_val << 3) | bit_pos;
-        pkt(&[0x70 | (0b10 << 3) | addr_high, addr_low, data, 0x00])
+        pkt(&[0x70 | (0b10 << 2) | addr_high, addr_low, data, 0x00])
     }
 
     fn operation_packet(addr: u16, instruction: &[u8]) -> Packet {
@@ -380,7 +384,7 @@ mod tests {
         let packet = service_verify_packet(10, 0x99);
         let result = harness.handle(&packet);
 
-        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(result, Ok(None));
     }
 
     #[test]

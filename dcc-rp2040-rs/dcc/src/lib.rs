@@ -1,4 +1,6 @@
 #![no_std]
+extern crate alloc;
+
 use crate::cv::store::{Store, StoreExt};
 use crate::transport::packet::Packet;
 use bitflags::bitflags;
@@ -62,7 +64,7 @@ pub struct FunctionGroup {
 impl FunctionGroup {
 
     /// Calculates the union between the other flags and these flags, taking into account the group mask.
-    pub fn union_flags(&self, other: FunctionGroupFlags) -> FunctionGroupFlags {
+    pub fn union_with_mask(&self, other: FunctionGroupFlags) -> FunctionGroupFlags {
         other.difference(self.group_mask).union(self.flags)
     }
 }
