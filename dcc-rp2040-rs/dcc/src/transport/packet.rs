@@ -425,9 +425,9 @@ mod tests {
 
     #[test]
     fn service_instruction_type_decode() {
-        let verify = pkt(&[0x08, 0x00, 0x00]); // (0x08 >> 3) = 0b00001
-        let manipulate = pkt(&[0x10, 0x00, 0x00]); // (0x10 >> 3) = 0b00010
-        let write = pkt(&[0x18, 0x00, 0x00]); // (0x18 >> 3) = 0b00011
+        let verify = pkt(&[0b0100, 0x00, 0x00]);
+        let manipulate = pkt(&[0b1000, 0x00, 0x00]);
+        let write = pkt(&[0b1100, 0x00, 0x00]);
 
         assert_eq!(
             verify.instruction_type().unwrap(),
@@ -445,14 +445,12 @@ mod tests {
 
     #[test]
     fn service_mode_cv_address_and_data() {
-        // CV address = ((byte0 & 0b11) << 8) + byte1
-        // Example 1: MSBs = 0b00, LSBs = 0x25 -> CV = 0x025
-        let p1 = pkt(&[0b0111_0100, 0x25, 0x99]);
+        let p1 = pkt(&[0b0111_0100, 0x24, 0x99]);
         assert_eq!(p1.cv_address().unwrap(), 0x025);
         assert_eq!(p1.cv_data().unwrap(), 0x99);
 
         // Example 2: MSBs = 0b11, LSBs = 0xFF -> CV = 0x3FF (1023, max per standard)
-        let p2 = pkt(&[0b0111_0011, 0xFF, 0x55]);
+        let p2 = pkt(&[0b0111_0011, 0xFE, 0x55]);
         assert_eq!(p2.cv_address().unwrap(), 0x3FF);
         assert_eq!(p2.cv_data().unwrap(), 0x55);
     }

@@ -95,7 +95,7 @@ impl Handler {
 
     pub fn handle(&mut self, function_group: FunctionGroup) {
         let old = self.flags;
-        self.flags = function_group.union_flags(self.flags);
+        self.flags = function_group.union_with_mask(self.flags);
 
         if self.flags != old {
             self.update_outputs()
