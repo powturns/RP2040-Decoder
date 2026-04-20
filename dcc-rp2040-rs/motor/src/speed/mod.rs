@@ -1,4 +1,3 @@
-use core::sync::atomic::{AtomicU32, Ordering};
 use crate::speed::Mode::{Pid, Startup};
 use crate::speed::startup::ComputeResult;
 

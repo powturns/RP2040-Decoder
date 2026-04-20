@@ -20,7 +20,7 @@ impl Timer for InstantTimer {
         self.mark = Some(Instant::now());
     }
 
-    fn elapsed(&self) -> Option<usize> {
+    fn elapsed_ms(&self) -> Option<usize> {
         self.mark.map(|m| m.elapsed().as_millis() as usize)
     }
 }

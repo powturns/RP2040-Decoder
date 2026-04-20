@@ -51,7 +51,7 @@ pub trait Timer {
     fn start(&mut self);
 
     /// Calculates the time since the previous reset in ms.
-    fn elapsed(&self) -> Option<usize>;
+    fn elapsed_ms(&self) -> Option<usize>;
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
