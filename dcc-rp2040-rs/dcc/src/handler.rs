@@ -9,7 +9,7 @@ use crate::transport::packet::{
 use crate::{FunctionGroup, FunctionGroupFlags, Timer, is_broadcast, is_recipient};
 use motor::VelocitySetpoint;
 
-const SERVICE_MODE_TIMEOUT: usize = 20;
+const SERVICE_MODE_TIMEOUT_MS: usize = 20;
 
 #[derive(Eq, PartialEq, Copy, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
@@ -39,6 +39,7 @@ where
 {
     enter_service_mode_timer: T,
     store: S,
+    pending_service_packet: Option<Packet>,
 }
 
 impl<T, S> Handler<T, S>
@@ -50,6 +51,7 @@ where
         Self {
             enter_service_mode_timer: timer,
             store,
+            pending_service_packet: None,
         }
     }
 
@@ -59,8 +61,8 @@ where
             // we may be entering service mode
             self.enter_service_mode_timer.start();
             self.handle_reset(packet).map(Some)
-        } else if let Some(elapsed) = self.enter_service_mode_timer.elapsed()
-            && elapsed < SERVICE_MODE_TIMEOUT
+        } else if let Some(elapsed) = self.enter_service_mode_timer.elapsed_ms()
+            && elapsed < SERVICE_MODE_TIMEOUT_MS
             && packet.service_mode_candidate()
         {
             self.enter_service_mode_timer.start();
@@ -90,6 +92,11 @@ where
     }
 
     fn handle_service_mode(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        if self.pending_service_packet.take().as_ref() != Some(packet) {
+            self.pending_service_packet = Some(packet.clone());
+            return Ok(None);
+        }
+
         // check for legacy reset packet
         if packet.data.len() == 2 && packet.data[..2] == [0b01111111, 0b00001000] {
             self.reset_to_factory_defaults()?;
@@ -101,6 +108,7 @@ where
             "handle_service_mode: type={:?}, packet={:08b}",
             packet_type, packet.data
         );
+
         match packet_type {
             ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet),
             ServiceInstructionType::VerifyByte => self.verify_byte(packet),
@@ -253,6 +261,7 @@ mod tests {
     use crate::cv::Cv::{DecoderConfiguration, ExtendedAddressMsb, PrimaryAddress};
     use crate::handler::Op::Reset;
     use crate::testing::{MockStore, MockTimer, pkt};
+    use crate::transport::packet::Error as PacketError;
     use motor::{Direction, SpeedStep};
 
     fn reset_packet() -> Packet {
@@ -384,6 +393,17 @@ mod tests {
                 .read_byte(addr)
                 .expect("error reading cv")
         }
+
+        /// Send the same packet twice and return the second result.
+        /// The first packet must latch (return Ok(None)).
+        fn send_two_packets(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+            assert_eq!(
+                self.handle(packet),
+                Ok(None),
+                "first service write packet should latch, not execute"
+            );
+            self.handle(packet)
+        }
     }
 
     #[test]
@@ -402,7 +422,7 @@ mod tests {
         harness.enter_service_mode();
 
         let packet = service_verify_packet(10, 0x42);
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&packet);
 
         assert_eq!(result, Ok(Some(AcknowledgeCv)));
     }
@@ -424,8 +444,7 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.enter_service_mode();
 
-        let packet = service_write_packet(20, 0xAB);
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&service_write_packet(20, 0xAB));
 
         assert_eq!(result, Ok(Some(AcknowledgeCv)));
         assert_eq!(harness.read_cv(20), 0xAB);
@@ -441,7 +460,7 @@ mod tests {
         harness.enter_service_mode();
 
         let packet = service_bit_verify_packet(15, 3, 1);
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&packet);
 
         assert_eq!(result, Ok(Some(AcknowledgeCv)));
     }
@@ -463,17 +482,11 @@ mod tests {
 
     #[test]
     fn test_service_bit_write_set() {
-        let store = MockStore::new().with_cv(
-            25,
-            0b0000_0000, // bit 3 is set
-        );
+        let store = MockStore::new().with_cv(25, 0b0000_0000);
         let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
 
-        harness.start_timer();
-        harness.set_timer_elapsed(10);
-
-        let packet = service_bit_write_packet(25, 5, 1); // set bit 5
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&service_bit_write_packet(25, 5, 1));
 
         assert_eq!(result, Ok(Some(AcknowledgeCv)));
         assert_eq!(harness.read_cv(25), 0b0010_0000);
@@ -483,12 +496,9 @@ mod tests {
     fn test_service_bit_write_clear() {
         let store = MockStore::new().with_cv(25, 0xFF);
         let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
 
-        harness.start_timer();
-        harness.set_timer_elapsed(10);
-
-        let packet = service_bit_write_packet(25, 2, 0); // clear bit 2
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&service_bit_write_packet(25, 2, 0));
 
         assert_eq!(result, Ok(Some(AcknowledgeCv)));
         assert_eq!(harness.read_cv(25), 0b1111_1011);
@@ -499,7 +509,7 @@ mod tests {
         let mut harness = TestHarness::new();
 
         harness.start_timer();
-        harness.set_timer_elapsed(SERVICE_MODE_TIMEOUT + 1); // past timeout
+        harness.set_timer_elapsed(SERVICE_MODE_TIMEOUT_MS + 1); // past timeout
 
         let packet = service_verify_packet(10, 0x42);
         let result = harness.handle(&packet);
@@ -588,19 +598,14 @@ mod tests {
         let mut harness = TestHarness::with_address(3);
 
         // Start with reset
-        let result = harness.handle(&reset_packet());
-        assert_eq!(result, Ok(Some(Op::Reset)));
-
-        // Timer should be running, set elapsed time
+        assert_eq!(harness.handle(&reset_packet()), Ok(Some(Op::Reset)));
         harness.set_timer_elapsed(5);
 
-        // Write CV
-        let result = harness.handle(&service_write_packet(100, 0x55));
+        let result = harness.send_two_packets(&service_write_packet(100, 0x55));
         assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
         assert_eq!(harness.read_cv(100), 0x55);
 
-        // Verify CV
-        let result = harness.handle(&service_verify_packet(100, 0x55));
+        let result = harness.send_two_packets(&service_verify_packet(100, 0x55));
         assert_eq!(result, Ok(Some(Op::AcknowledgeCv)));
     }
 
@@ -609,24 +614,16 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.enter_service_mode();
 
-        // Test writing each bit position
         for bit_pos in 0..8 {
-            let packet = service_bit_write_packet(50, bit_pos, 1);
-            let result = harness.handle(&packet);
+            let result = harness.send_two_packets(&service_bit_write_packet(50, bit_pos, 1));
             assert_eq!(result, Ok(Some(AcknowledgeCv)));
         }
-
-        // All bits should be set
         assert_eq!(harness.read_cv(50), 0xFF);
 
-        // Clear each bit
         for bit_pos in 0..8 {
-            let packet = service_bit_write_packet(50, bit_pos, 0);
-            let result = harness.handle(&packet);
+            let result = harness.send_two_packets(&service_bit_write_packet(50, bit_pos, 0));
             assert_eq!(result, Ok(Some(AcknowledgeCv)));
         }
-
-        // All bits should be clear
         assert_eq!(harness.read_cv(50), 0x00);
     }
 
@@ -638,11 +635,10 @@ mod tests {
         let mut harness = TestHarness::with_store(store);
         harness.enter_service_mode();
 
-        let packet = service_write_packet(1, 5);
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&service_write_packet(1, 5));
 
         assert_eq!(result, Ok(Some(AcknowledgeCv)));
-        assert_eq!(harness.read_cv(1), 5); // CV1 updated
+        assert_eq!(harness.read_cv(1), 5);
         assert_eq!(harness.read_cv(29) & 0b00100000, 0); // CV29 bit 5 cleared
         assert_eq!(harness.read_cv(19), 0); // CV19 cleared
     }
@@ -652,8 +648,36 @@ mod tests {
         let mut harness = TestHarness::new();
         harness.enter_service_mode();
 
+        // First packet latches; second executes and rejects the out-of-range value
+        let invalid_err = Err(Error::Packet(PacketError::InvalidInstruction));
         assert_eq!(harness.handle(&service_write_packet(1, 0)), Ok(None));
+        assert_eq!(harness.handle(&service_write_packet(1, 0)), invalid_err);
+
         assert_eq!(harness.handle(&service_write_packet(1, 128)), Ok(None));
+        assert_eq!(harness.handle(&service_write_packet(1, 128)), invalid_err);
+    }
+
+    #[test]
+    fn test_service_write_latch_first_packet_returns_none() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let result = harness.handle(&service_write_packet(20, 0xAB));
+
+        assert_eq!(result, Ok(None));
+        assert_eq!(harness.read_cv(20), 0x00); // not written
+    }
+
+    #[test]
+    fn test_service_write_latch_different_second_packet_does_not_execute() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        // Latch CV 20 = 0xAB
+        assert_eq!(harness.handle(&service_write_packet(20, 0xAB)), Ok(None));
+        // Different data — does not match, re-latches, does not write
+        assert_eq!(harness.handle(&service_write_packet(20, 0xFF)), Ok(None));
+        assert_eq!(harness.read_cv(20), 0x00);
     }
 
     #[test]
@@ -662,7 +686,7 @@ mod tests {
         harness.enter_service_mode();
 
         let packet = pkt(&[0b01111111, 0b00001000]);
-        let result = harness.handle(&packet);
+        let result = harness.send_two_packets(&packet);
 
         assert_eq!(result, Ok(Some(Reboot)));
     }

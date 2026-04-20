@@ -33,11 +33,12 @@ external entity CommandStation {
 -- Value Types
 ------------------------------------------------------------
 
-value PendingWriteOperation {
+value PendingOperation {
     cv_number: Integer          -- 1–1023
-    data: Integer               -- 0–255 for byte operations
-    bit_position: Integer?      -- 0–7 for bit operations
+    data: Integer               -- 0–255 for byte ops; 0 or 1 for bit ops
+    bit_position: Integer?      -- 0–7 for bit operations; null for byte operations
     is_bit_write: Boolean       -- true = bit operation; false = byte operation
+    is_verify: Boolean          -- true = verify; false = write
 }
 
 ------------------------------------------------------------
@@ -61,8 +62,9 @@ entity Decoder {
         terminal:
     }
 
-    -- Held while waiting for the confirming second identical packet
-    pending_operation: PendingWriteOperation?
+    -- Held while waiting for the confirming second identical packet.
+    -- Set by any service mode instruction (verify or write); cleared on execution or mismatch.
+    pending_operation: PendingOperation?
 
     -- Decoder Lock state (Appendix B). When locked, decoder ignores
     -- service mode packets addressed to a different decoder.
@@ -115,8 +117,8 @@ config {
 ------------------------------------------------------------
 
 -- Returns true if the two pending operations are identical
--- (same cv_number, data, bit_position, is_bit_write).
-function matches_pending_operation(a: PendingWriteOperation, b: PendingWriteOperation) -> Boolean
+-- (same cv_number, data, bit_position, is_bit_write, is_verify).
+function matches_pending_operation(a: PendingOperation, b: PendingOperation) -> Boolean
 
 -- Returns true if the given bit of value equals expected_bit.
 function bit_matches(value: Integer, bit_position: Integer, expected_bit: Integer) -> Boolean
@@ -177,10 +179,13 @@ rule DecoderReturnsToOperations {
     ensures: decoder.mode = operations
 }
 
--- ── Two-Packet Write Latch ───────────────────────────────
+-- ── Two-Packet Latch ────────────────────────────────────
+--
+-- The two-packet latch applies to ALL service mode instructions: both
+-- Verify and Write operations require two identical packets with no
+-- intervening valid packet before the decoder executes the operation.
 
--- First service mode instruction: decoder records the pending operation
--- but does not yet execute it.
+-- First service mode write instruction: decoder latches and waits.
 rule DecoderLatchesFirstWritePacket {
     when: ServiceModeWritePacketReceived(decoder, operation, packet)
 
@@ -191,8 +196,30 @@ rule DecoderLatchesFirstWritePacket {
     ensures: decoder.pending_operation = operation
 }
 
--- A different or invalid second packet clears the latch without executing.
-rule DecoderClearsPendingOnMismatch {
+-- First service mode verify-byte instruction: decoder latches and waits.
+rule DecoderLatchesFirstVerifyBytePacket {
+    when: ServiceModeVerifyPacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: decoder.pending_operation = null
+
+    ensures: decoder.pending_operation = operation
+}
+
+-- First service mode verify-bit instruction: decoder latches and waits.
+rule DecoderLatchesFirstVerifyBitPacket {
+    when: ServiceModeBitVerifyPacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: decoder.pending_operation = null
+
+    ensures: decoder.pending_operation = operation
+}
+
+-- A non-matching second write packet re-latches to the new packet without executing.
+rule DecoderClearsPendingOnWriteMismatch {
     when: ServiceModeWritePacketReceived(decoder, operation, packet)
 
     requires: decoder.mode = service
@@ -200,25 +227,60 @@ rule DecoderClearsPendingOnMismatch {
     requires: decoder.pending_operation != null
     requires: not matches_pending_operation(decoder.pending_operation, operation)
 
-    ensures: decoder.pending_operation = null
+    ensures: decoder.pending_operation = operation
 
     @guidance
-        -- The decoder has now seen two non-identical service mode packets.
-        -- The latch is cleared; it waits again for a fresh first packet.
+        -- The new packet becomes the first of a fresh two-packet sequence.
+}
+
+-- A non-matching second verify-byte packet re-latches without executing.
+rule DecoderClearsPendingOnVerifyByteMismatch {
+    when: ServiceModeVerifyPacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: decoder.pending_operation != null
+    requires: not matches_pending_operation(decoder.pending_operation, operation)
+
+    ensures: decoder.pending_operation = operation
+
+    @guidance
+        -- Any intervening service mode packet (verify or write) resets the sequence.
+}
+
+-- A non-matching second verify-bit packet re-latches without executing.
+rule DecoderClearsPendingOnVerifyBitMismatch {
+    when: ServiceModeBitVerifyPacketReceived(decoder, operation, packet)
+
+    requires: decoder.mode = service
+    requires: packet.is_valid
+    requires: decoder.pending_operation != null
+    requires: not matches_pending_operation(decoder.pending_operation, operation)
+
+    ensures: decoder.pending_operation = operation
+
+    @guidance
+        -- Any intervening service mode packet (verify or write) resets the sequence.
 }
 
 -- ── CV Byte Verify ──────────────────────────────────────
 
--- Decoder verifies a CV byte value and sends an acknowledgment if it matches.
+-- Decoder verifies a CV byte value after receiving two identical verify packets.
 rule DecoderVerifiesCVByte {
-    when: ServiceModeVerifyPacketReceived(decoder, cv_number, expected_value, packet)
+    when: ServiceModeVerifyPacketReceived(decoder, operation, packet)
 
     requires: decoder.mode = service
     requires: packet.is_valid
-    requires: cv_number >= 1 and cv_number <= 1023
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+    requires: operation.cv_number >= 1 and operation.cv_number <= 1023
 
-    -- Decoder sends acknowledgment iff the CV value matches expected_value.
-    -- No state change occurs regardless of the outcome.
+    let cv = ConfigurationVariable where decoder = decoder and number = operation.cv_number
+
+    ensures: decoder.pending_operation = null
+
+    -- Decoder sends acknowledgment iff cv.value = operation.data.
+    -- The CV value is not modified.
     @guidance
         -- Acknowledgment is a 60 mA positive current delta sustained for
         -- at least 6 ms (see open question on Duration granularity).
@@ -251,21 +313,26 @@ rule DecoderWritesCVByte {
 
 -- ── CV Bit Verify ───────────────────────────────────────
 
--- Decoder verifies a single bit within a CV and sends acknowledgment if it matches.
+-- Decoder verifies a single bit within a CV after receiving two identical verify packets.
 rule DecoderVerifiesCVBit {
-    when: ServiceModeBitVerifyPacketReceived(decoder, cv_number, bit_position, expected_bit, packet)
+    when: ServiceModeBitVerifyPacketReceived(decoder, operation, packet)
 
     requires: decoder.mode = service
     requires: packet.is_valid
-    requires: cv_number >= 1 and cv_number <= 1023
-    requires: bit_position >= 0 and bit_position <= 7
-    requires: expected_bit = 0 or expected_bit = 1
+    requires: decoder.pending_operation != null
+    requires: matches_pending_operation(decoder.pending_operation, operation)
+    requires: operation.cv_number >= 1 and operation.cv_number <= 1023
+    requires: operation.bit_position != null
+    requires: operation.bit_position >= 0 and operation.bit_position <= 7
+    requires: operation.data = 0 or operation.data = 1
 
-    let cv = ConfigurationVariable where decoder = decoder and number = cv_number
+    let cv = ConfigurationVariable where decoder = decoder and number = operation.cv_number
 
-    -- Sends acknowledgment iff bit_matches(cv.value, bit_position, expected_bit).
+    ensures: decoder.pending_operation = null
+
+    -- Sends acknowledgment iff bit_matches(cv.value, operation.bit_position, operation.data).
     @guidance
-        -- No state change occurs; acknowledgment signals a match only.
+        -- No CV state change occurs; acknowledgment signals a match only.
 }
 
 -- ── CV Bit Write ────────────────────────────────────────

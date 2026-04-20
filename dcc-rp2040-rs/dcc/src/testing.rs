@@ -104,7 +104,7 @@ impl Timer for MockTimer {
         self.running = true;
     }
 
-    fn elapsed(&self) -> Option<usize> {
+    fn elapsed_ms(&self) -> Option<usize> {
         if self.running { self.elapsed } else { None }
     }
 }
