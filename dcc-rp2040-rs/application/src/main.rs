@@ -251,6 +251,9 @@ async fn main(spawner: Spawner) {
             pwm_max_output: output_max,
             pwm_clk_divider: fixed::FixedU16::from_num(unwrap!(cv_store.motor_pwm_divider()) as u16),
             emf_measurement_delay: unwrap!(unwrap!(cv_store.emf_measurement_delay()).try_into()),
+            emf_samples: unwrap!(cv_store.emf_samples()),
+            emf_l_cutoff: unwrap!(cv_store.emf_l_side_cutoff()),
+            emf_r_cutoff: unwrap!(cv_store.emf_r_side_cutoff()),
         };
 
         debug!("motor::Config={:?}", config);
