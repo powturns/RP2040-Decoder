@@ -109,6 +109,7 @@ mod tests {
     extern crate std;
 
     use super::*;
+    use crate::Direction::{self, Forward};
     use crate::SpeedStep;
     use alloc::vec;
     use alloc::vec::Vec;

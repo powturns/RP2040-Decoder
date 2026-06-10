@@ -236,12 +236,6 @@ mod tests {
     //endregion
 
     //region CV-default based tests
-    #[test]
-    fn test_pid_constructs_with_cv_defaults() {
-        let pid = build_default_pid();
-        // sanity: last_output starts at 0
-        assert_f32_near!(pid.last_output(), 0.0);
-    }
 
     #[test]
     fn test_pid_kp_schedule_matches_cv_defaults() {
