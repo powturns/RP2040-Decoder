@@ -1,5 +1,4 @@
 #![no_std]
-extern crate alloc;
 
 use crate::cv::store::{Store, StoreExt};
 use crate::transport::packet::Packet;

@@ -257,6 +257,7 @@ impl From<StoreError> for Error {
 
 #[cfg(test)]
 mod tests {
+    extern crate alloc;
     use super::*;
     use crate::cv::Cv::{DecoderConfiguration, ExtendedAddressMsb, PrimaryAddress};
     use crate::handler::Op::Reset;
