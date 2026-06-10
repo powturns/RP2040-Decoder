@@ -15,6 +15,10 @@ use motor::{Direction, VelocitySetpoint};
 
 const ADC_CALIBRATION_ITERATIONS: usize = 8192;
 
+/// Maximum number of ADC samples taken per EMF measurement. The sample count comes from
+/// CV61, which is a `u8`, so 255 covers the entire configurable range.
+const MAX_EMF_SAMPLES: usize = u8::MAX as usize;
+
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub enum Error {
     Pwm(#[cfg_attr(feature = "defmt", defmt(Debug2Format))] pwm::PwmError),
@@ -35,6 +39,15 @@ pub struct Config {
     pub pwm_clk_divider: fixed::FixedU16<fixed::types::extra::U4>,
 
     pub emf_measurement_delay: Duration,
+
+    /// Number of ADC samples per EMF measurement. Clamped to [1, MAX_SAMPLES].
+    pub emf_samples: u8,
+
+    /// Samples discarded from the high end of the sorted emf measurement.
+    pub emf_l_cutoff: u8,
+
+    /// Samples discarded from the high end of the sorted emf measurement.
+    pub emf_r_cutoff: u8,
 }
 
 pub struct RpMotorController<DMA: dma::Channel> {
@@ -45,6 +58,9 @@ pub struct RpMotorController<DMA: dma::Channel> {
     adc: Adc<'static, Async>,
     pub dma: Peri<'static, DMA>,
     ack_dir: Direction,
+    /// Fixed-capacity buffer for EMF samples, reused across measurements. Only the first
+    /// `config.emf_samples` entries are used on any given measurement.
+    emf_buf: [u16; MAX_EMF_SAMPLES],
 }
 
 impl<DMA: dma::Channel> RpMotorController<DMA> {
@@ -87,6 +103,7 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
             adc,
             dma,
             ack_dir: Direction::Forward,
+            emf_buf: [0; MAX_EMF_SAMPLES],
         }
     }
 
@@ -96,10 +113,18 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
         self.fwd.stop()?;
         self.rev.stop()?;
 
-        // FIXME: use a configurable sample size
-        const SAMPLE_CNT: usize = 100; //CV_ARRAY_FLASH[60]
+        // Number of samples to take, clamped to the fixed-capacity buffer (CV61).
+        let n = (self.config.emf_samples as usize).clamp(1, MAX_EMF_SAMPLES);
 
-        let buf = &mut [0; SAMPLE_CNT];
+        // Samples discarded from each end of the sorted measurement (CV63 / CV64). Guard
+        // against pathological CVs that would otherwise discard every sample.
+        let (l_cutoff, r_cutoff) = {
+            let l = self.config.emf_l_cutoff as usize;
+            let r = self.config.emf_r_cutoff as usize;
+            if l + r < n { (l, r) } else { (0, 0) }
+        };
+
+        let buf = &mut self.emf_buf[..n];
 
         Timer::after(self.config.emf_measurement_delay).await;
 
@@ -118,15 +143,11 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
 
         buf.sort_unstable();
 
-        // outlier removal - FIXME: use a configurable cutoff value
-        let l_side_arr_cutoff = 15; // CV_ARRAY_FLASH[62]
-        let r_side_arr_cutoff = 15; // CV_ARRAY_FLASH[63]
-
-        let filtered_cnt = SAMPLE_CNT - (l_side_arr_cutoff + r_side_arr_cutoff);
+        let filtered_cnt = n - (l_cutoff + r_cutoff);
 
         let sum: u32 = buf
             .iter()
-            .skip(l_side_arr_cutoff)
+            .skip(l_cutoff)
             .take(filtered_cnt)
             .map(|&x| x as u32)
             .sum();

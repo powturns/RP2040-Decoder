@@ -141,6 +141,9 @@ pub trait StoreExt {
     /// Delay between cutting power to the motor and measuring the EMF signal.
     fn emf_measurement_delay(&self) -> Result<Duration, Error>;
 
+    /// Number of ADC samples taken per EMF measurement (CV61).
+    fn emf_samples(&self) -> Result<u8, Error>;
+
     fn emf_l_side_cutoff(&self) -> Result<u8, Error>;
     fn emf_r_side_cutoff(&self) -> Result<u8, Error>;
 
@@ -255,6 +258,10 @@ impl<T: Store> StoreExt for T {
         Ok(Duration::from_micros(
             self.read_byte(EmfMsrDelay as usize)? as u64
         ))
+    }
+
+    fn emf_samples(&self) -> Result<u8, Error> {
+        self.read_byte(EmfMsrSamples as usize)
     }
 
     fn emf_l_side_cutoff(&self) -> Result<u8, Error> {
