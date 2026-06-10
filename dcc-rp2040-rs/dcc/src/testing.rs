@@ -1,3 +1,5 @@
+extern crate alloc;
+
 use crate::Timer;
 use crate::cv::CV_SIZE;
 use crate::cv::store::{Error, Store};
