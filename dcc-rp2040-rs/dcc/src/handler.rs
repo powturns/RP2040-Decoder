@@ -134,9 +134,13 @@ where
     }
 
     fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        // TODO: we dont allow writing every cv!, some are reserved for special operations!
-
         let address = packet.cv_address()?;
+
+        // CV31/CV32 select the CV index page (S-9.2.2). This decoder does not implement
+        // indexed CVs, so the writes are silently ignored (matches core0.c:write_cv_handler).
+        if address == 31 || address == 32 {
+            return Ok(None);
+        }
 
         let write = match Cv::try_from(address) {
             Ok(addr) => match addr {
@@ -173,6 +177,31 @@ where
                     }
 
                     return Ok(Some(Reboot));
+                }
+
+                Cv::ExtendedAddressMsb => {
+                    // CV17 holds the high 6 bits of the extended address and must be in
+                    // 192..=231. CV17 == 192 with CV18 == 0 would form address 0, which is
+                    // invalid. (core0.c:write_cv_handler)
+                    let value = packet.cv_data()?;
+                    let cv18 = self.store.read_byte(Cv::ExtendedAddressLsb as usize)?;
+                    if !(192..=231).contains(&value) || (cv18 == 0 && value == 192) {
+                        return Err(PacketError::InvalidInstruction.into());
+                    }
+                    self.store.write_byte(Cv::ExtendedAddressMsb as usize, value)?;
+                    return Ok(Some(AcknowledgeCv));
+                }
+
+                Cv::ExtendedAddressLsb => {
+                    // CV18 holds the low 8 bits. Reject the value that would form address 0
+                    // when CV17 is already at its minimum (192). (core0.c:write_cv_handler)
+                    let value = packet.cv_data()?;
+                    let cv17 = self.store.read_byte(Cv::ExtendedAddressMsb as usize)?;
+                    if cv17 == 192 && value == 0 {
+                        return Err(PacketError::InvalidInstruction.into());
+                    }
+                    self.store.write_byte(Cv::ExtendedAddressLsb as usize, value)?;
+                    return Ok(Some(AcknowledgeCv));
                 }
 
                 _ => true,
@@ -656,6 +685,98 @@ mod tests {
 
         assert_eq!(harness.handle(&service_write_packet(1, 128)), Ok(None));
         assert_eq!(harness.handle(&service_write_packet(1, 128)), invalid_err);
+    }
+
+    #[test]
+    fn test_service_write_cv17_valid() {
+        let store = MockStore::new().with_cv(18, 0x01); // CV18 non-zero -> address != 0
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        // CV17 = 200 is within the required 192..=231 range
+        let result = harness.send_two_packets(&service_write_packet(17, 200));
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(17), 200);
+    }
+
+    #[test]
+    fn test_service_write_cv17_out_of_range() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let invalid_err = Err(Error::Packet(PacketError::InvalidInstruction));
+
+        // Below the valid 192..=231 range
+        assert_eq!(
+            harness.send_two_packets(&service_write_packet(17, 100)),
+            invalid_err
+        );
+        assert_eq!(harness.read_cv(17), 0);
+
+        // Above the valid range
+        assert_eq!(
+            harness.send_two_packets(&service_write_packet(17, 240)),
+            invalid_err
+        );
+        assert_eq!(harness.read_cv(17), 0);
+    }
+
+    #[test]
+    fn test_service_write_cv17_rejects_address_zero() {
+        // CV18 defaults to 0; writing CV17 = 192 would form extended address 0.
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let result = harness.send_two_packets(&service_write_packet(17, 192));
+
+        assert_eq!(result, Err(Error::Packet(PacketError::InvalidInstruction)));
+        assert_eq!(harness.read_cv(17), 0);
+    }
+
+    #[test]
+    fn test_service_write_cv18_rejects_address_zero() {
+        // CV17 == 192 and writing CV18 = 0 would form extended address 0.
+        let store = MockStore::new().with_cv(17, 192);
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let result = harness.send_two_packets(&service_write_packet(18, 0));
+
+        assert_eq!(result, Err(Error::Packet(PacketError::InvalidInstruction)));
+        assert_eq!(harness.read_cv(18), 0);
+    }
+
+    #[test]
+    fn test_service_write_cv18_valid() {
+        let store = MockStore::new().with_cv(17, 200);
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+
+        let result = harness.send_two_packets(&service_write_packet(18, 5));
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(18), 5);
+    }
+
+    #[test]
+    fn test_service_write_cv31_cv32_ignored() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        // CV31/CV32 select the CV index page; this decoder does not implement indexed CVs,
+        // so the write is silently ignored (no store change, no ack).
+        assert_eq!(
+            harness.send_two_packets(&service_write_packet(31, 0xAB)),
+            Ok(None)
+        );
+        assert_eq!(harness.read_cv(31), 0);
+
+        assert_eq!(
+            harness.send_two_packets(&service_write_packet(32, 0xCD)),
+            Ok(None)
+        );
+        assert_eq!(harness.read_cv(32), 0);
     }
 
     #[test]
