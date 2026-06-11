@@ -119,7 +119,7 @@ impl Handler {
         // Accumulate which outputs should be on by OR-ing together all active function maps
         let mut output_mask = 0u32;
         for (func_idx, enabled_outputs) in map.iter().enumerate().take(32) {
-            if (self.flags.bits() & 1u16 << func_idx) != 0 {
+            if (self.flags.bits() & 1u32 << func_idx) != 0 {
                 output_mask |= enabled_outputs;
             }
         }
