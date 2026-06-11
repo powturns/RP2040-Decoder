@@ -173,7 +173,12 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
             OperationInstructionType::FunctionGroup2 => {
                 Ok(OperationModeInstruction::FunctionGroup(parse_fg2(first)))
             }
-            OperationInstructionType::FeatureExpansion => Err(Error::InvalidInstruction),
+            OperationInstructionType::FeatureExpansion => {
+                let second = *data.get(1).ok_or(Error::Undersize)?;
+                parse_feature_expansion(first, second)
+                    .map(OperationModeInstruction::FunctionGroup)
+                    .ok_or(Error::InvalidInstruction)
+            }
             OperationInstructionType::CVAccess => Err(Error::InvalidInstruction),
         }
     }
@@ -243,6 +248,32 @@ fn parse_fg2(instruction: u8) -> FunctionGroup {
     };
 
     FunctionGroup::new(group_mask, flags)
+}
+
+/// Parses a Feature Expansion instruction (instruction type `0b110`).
+///
+/// `first` is the instruction byte and `second` is the following data byte holding the
+/// function bitmap.
+/// - `0b1101_1110` → F13–F20 (bitmap bits 0..7 map to F13..F20)
+/// - `0b1101_1111` → F21–F28 (bitmap bits 0..7 map to F21..F28)
+/// - `0b1101_1000` → F29–F31 (bitmap bits 0..2 map to F29..F31)
+///
+/// Returns `None` for any other (reserved / unsupported) Feature Expansion sub-instruction.
+fn parse_feature_expansion(first: u8, second: u8) -> Option<FunctionGroup> {
+    let (group_mask, bits) = match first {
+        0b1101_1110 => (FunctionGroupFlags::FG_FEATURE_13_20, (second as u32) << 13),
+        0b1101_1111 => (FunctionGroupFlags::FG_FEATURE_21_28, (second as u32) << 21),
+        0b1101_1000 => (
+            FunctionGroupFlags::FG_FEATURE_29_31,
+            ((second & 0b0000_0111) as u32) << 29,
+        ),
+        _ => return None,
+    };
+
+    Some(FunctionGroup::new(
+        group_mask,
+        FunctionGroupFlags::from_bits_truncate(bits),
+    ))
 }
 
 #[repr(u8)]
@@ -434,6 +465,93 @@ mod tests {
         } else {
             panic!("Expected FunctionGroup");
         }
+    }
+
+    /// Locks in the canonical flag layout (B3a): bit position N corresponds to function N
+    /// (FL is F0), matching the C reference and the application's CV output-map index.
+    #[test]
+    fn function_flag_bit_positions_match_function_index() {
+        assert_eq!(FunctionGroupFlags::FL.bits(), 1 << 0);
+        assert_eq!(FunctionGroupFlags::F1.bits(), 1 << 1);
+        assert_eq!(FunctionGroupFlags::F4.bits(), 1 << 4);
+        assert_eq!(FunctionGroupFlags::F5.bits(), 1 << 5);
+        assert_eq!(FunctionGroupFlags::F12.bits(), 1 << 12);
+        assert_eq!(FunctionGroupFlags::F13.bits(), 1 << 13);
+        assert_eq!(FunctionGroupFlags::F28.bits(), 1 << 28);
+        assert_eq!(FunctionGroupFlags::F31.bits(), 1 << 31);
+    }
+
+    #[test]
+    fn feature_expansion_f13_f20() {
+        // 0b1101_1110 = 0xDE selects F13-F20; bitmap bit0->F13 .. bit7->F20.
+        // 0b1000_0001 -> F13 and F20 set, the rest clear.
+        let p = pkt(&[3, 0xDE, 0b1000_0001]);
+        let op = OperationModeInstruction::try_from(&p).unwrap();
+
+        if let OperationModeInstruction::FunctionGroup(fg) = op {
+            assert_eq!(fg.group_mask, FunctionGroupFlags::FG_FEATURE_13_20);
+            assert_eq!(
+                fg.flags,
+                FunctionGroupFlags::F13 | FunctionGroupFlags::F20
+            );
+        } else {
+            panic!("Expected FunctionGroup");
+        }
+    }
+
+    #[test]
+    fn feature_expansion_f21_f28() {
+        // 0b1101_1111 = 0xDF selects F21-F28; bitmap bit0->F21 .. bit7->F28.
+        let p = pkt(&[3, 0xDF, 0b1000_0001]);
+        let op = OperationModeInstruction::try_from(&p).unwrap();
+
+        if let OperationModeInstruction::FunctionGroup(fg) = op {
+            assert_eq!(fg.group_mask, FunctionGroupFlags::FG_FEATURE_21_28);
+            assert_eq!(
+                fg.flags,
+                FunctionGroupFlags::F21 | FunctionGroupFlags::F28
+            );
+        } else {
+            panic!("Expected FunctionGroup");
+        }
+    }
+
+    #[test]
+    fn feature_expansion_f29_f31() {
+        // 0b1101_1000 = 0xD8 selects F29-F31; only the low 3 bitmap bits are used.
+        // 0b0000_0101 -> F29 and F31; high bits must be ignored.
+        let p = pkt(&[3, 0xD8, 0b1111_1101]);
+        let op = OperationModeInstruction::try_from(&p).unwrap();
+
+        if let OperationModeInstruction::FunctionGroup(fg) = op {
+            assert_eq!(fg.group_mask, FunctionGroupFlags::FG_FEATURE_29_31);
+            assert_eq!(
+                fg.flags,
+                FunctionGroupFlags::F29 | FunctionGroupFlags::F31
+            );
+        } else {
+            panic!("Expected FunctionGroup");
+        }
+    }
+
+    #[test]
+    fn feature_expansion_unknown_subcode_is_invalid() {
+        // A Feature Expansion instruction we don't implement (e.g. 0b1100_0000) is rejected.
+        let p = pkt(&[3, 0b1100_0000, 0x00]);
+        assert_eq!(
+            OperationModeInstruction::try_from(&p),
+            Err(Error::InvalidInstruction)
+        );
+    }
+
+    #[test]
+    fn feature_expansion_missing_data_byte_is_undersize() {
+        // Feature Expansion needs a following data byte.
+        let p = pkt(&[3, 0xDE]);
+        assert_eq!(
+            OperationModeInstruction::try_from(&p),
+            Err(Error::Undersize)
+        );
     }
 
     // The following tests are based on NMRA DCC standards (S-9.2 and S-9.2.3):
