@@ -90,7 +90,21 @@ impl<'d, T: Instance, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, SM
         let din: &mut [u32] = bytemuck::cast_slice_mut(buff);
         rx.dma_pull(&mut self.dma, din, true).await;
 
-        let len = 7_usize.saturating_sub(buff[7] as usize);
+        // The PIO pads every packet to a fixed 8-byte (2-word) output and stores the
+        // number of padding bytes in the final byte; the true length is `7 - padding`.
+        // The count lands at buff[7] because the SM shifts it in LAST under
+        // ShiftDirection::Left with autopush threshold 32, and dma_pull(bswap = true)
+        // places that last-shifted byte at the end of the buffer. It is a register
+        // value (not pin data), so it is NOT inverted like the data bytes below.
+        // Changing the shift direction, threshold, or bswap will move this byte and
+        // silently break length recovery.
+        let padding = buff[7] as usize;
+        if padding > 7 {
+            // Corrupted/garbled packet: saturating_sub yields len 0 and the codec
+            // rejects it as Undersize. Log so the drop is diagnosable instead of silent.
+            debug!("dropping packet: invalid padding count {} (expected 0..=7)", padding);
+        }
+        let len = 7_usize.saturating_sub(padding);
         let buff = &mut buff[..len];
 
         // received bytes come inverted off the wire
