@@ -1,4 +1,4 @@
-use embassy_rp::dma::Channel;
+use embassy_rp::dma;
 use fixed::traits::ToFixed;
 
 use dcc::transport::{Decoder, RawDccDecoder};
@@ -10,12 +10,12 @@ use embassy_rp::pio::{
     ShiftDirection, StateMachine,
 };
 
-pub fn pio_decoder<'d, T: Instance, C: Channel, const SM: usize>(
+pub fn pio_decoder<'d, T: Instance, const SM: usize>(
     pio: &mut Common<'d, T>,
     sm: StateMachine<'d, T, SM>,
     dcc_input: Peri<'d, impl PioPin + 'd>,
-    dma: Peri<'d, C>,
-) -> Decoder<PioDccDecoder<'d, T, C, SM>> {
+    dma: dma::Channel<'d>,
+) -> Decoder<PioDccDecoder<'d, T, SM>> {
     let prg = PioDccDecoderProgram::new(pio);
     let decoder1 = PioDccDecoder::new(pio, sm, dcc_input, dma, &prg);
 
@@ -37,18 +37,18 @@ impl<'a, PIO: Instance> PioDccDecoderProgram<'a, PIO> {
 }
 
 /// Pio backed DCC decoder.
-pub struct PioDccDecoder<'d, T: Instance, C: Channel, const SM: usize> {
+pub struct PioDccDecoder<'d, T: Instance, const SM: usize> {
     sm: StateMachine<'d, T, SM>,
-    dma: Peri<'d, C>,
+    dma: dma::Channel<'d>,
 }
 
-impl<'d, T: Instance, C: Channel, const SM: usize> PioDccDecoder<'d, T, C, SM> {
+impl<'d, T: Instance, const SM: usize> PioDccDecoder<'d, T, SM> {
     /// Configure a state machine with the loaded [PioEncoderProgram]
     fn new(
         pio: &mut Common<'d, T>,
         mut sm: StateMachine<'d, T, SM>,
         dcc_input: Peri<'d, impl PioPin + 'd>,
-        dma: Peri<'d, C>,
+        dma: dma::Channel<'d>,
         program: &PioDccDecoderProgram<'d, T>,
     ) -> Self {
         let mut dcc_input = pio.make_pio_pin(dcc_input);
@@ -82,13 +82,13 @@ impl<'d, T: Instance, C: Channel, const SM: usize> PioDccDecoder<'d, T, C, SM> {
     }
 }
 
-impl<'d, T: Instance, C: Channel, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, C, SM> {
+impl<'d, T: Instance, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, SM> {
     async fn read<'a>(&mut self, buff: &'a mut [u8]) -> &'a [u8] {
         assert!(buff.len() >= 8);
         let rx = self.sm.rx();
 
         let din: &mut [u32] = bytemuck::cast_slice_mut(buff);
-        rx.dma_pull(self.dma.reborrow(), din, true).await;
+        rx.dma_pull(&mut self.dma, din, true).await;
 
         let len = 7_usize.saturating_sub(buff[7] as usize);
         let buff = &mut buff[..len];

@@ -6,7 +6,6 @@ use ::motor::speed::accel;
 use core::cmp::min;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, Either3, select, select3};
-use embassy_rp::peripherals::DMA_CH2;
 use embassy_sync::blocking_mutex::raw::{ThreadModeRawMutex};
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
@@ -35,18 +34,18 @@ impl From<::motor::speed::Error> for Error {
 pub(crate) fn spawn(
     spawner: Spawner,
     pid_sample_time: Duration,
-    motor_controller: RpMotorController<DMA_CH2>,
+    motor_controller: RpMotorController,
     speed_control: SpeedController,
     accel_helper: accel::Helper,
     speed_table: SpeedTable,
 ) {
-    spawner.must_spawn(accel_helper_task(accel_helper, speed_table));
-    spawner.must_spawn(motor_controller_task(
+    spawner.spawn(unwrap!(accel_helper_task(accel_helper, speed_table)));
+    spawner.spawn(unwrap!(motor_controller_task(
         pid_sample_time,
         motor_controller,
         speed_control,
-    ));
-    spawner.must_spawn(dispatcher());
+    )));
+    spawner.spawn(unwrap!(dispatcher()));
 }
 
 #[embassy_executor::task]
@@ -81,12 +80,12 @@ static MOTOR_SPEED_CHANNEL: Signal<ThreadModeRawMutex, OutputLevel> = Signal::ne
 #[embassy_executor::task]
 async fn motor_controller_task(
     pid_sample_time: Duration,
-    mut motor_controller: RpMotorController<DMA_CH2>,
+    mut motor_controller: RpMotorController,
     mut speed_control: SpeedController,
 ) {
     trace!("starting motor controller task");
     async fn compute_and_set_output(
-        motor_controller: &mut RpMotorController<DMA_CH2>,
+        motor_controller: &mut RpMotorController,
         speed_control: &mut SpeedController,
         level: OutputLevel,
     ) -> Result<(), Error> {
@@ -112,7 +111,7 @@ async fn motor_controller_task(
     };
 
     let mut set_output = async |new_output_level: Option<OutputLevel>,
-                                motor_controller: &mut RpMotorController<DMA_CH2>,
+                                motor_controller: &mut RpMotorController,
                                 speed_control: &mut SpeedController,
                                 pid_sample_timer: &mut Timer| {
         if let Some(new_output_level) = new_output_level {
