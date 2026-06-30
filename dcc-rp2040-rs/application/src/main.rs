@@ -37,8 +37,9 @@ use dcc::handler::{Handler, Op};
 use embassy_executor::{Spawner};
 use embassy_rp::adc;
 use embassy_rp::adc::Adc;
+use embassy_rp::dma;
 use embassy_rp::flash::{Async, FLASH_BASE, Flash};
-use embassy_rp::peripherals::{DMA_CH0, FLASH, PIO0};
+use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, FLASH, PIO0};
 use embassy_rp::pio;
 use embassy_rp::pio::Pio;
 use embassy_rp::{Peri, bind_interrupts, peripherals};
@@ -53,7 +54,7 @@ const FLASH_SIZE: usize = 2 * 1024 * 1024;
 // Provide FLASH_SIZE from build.rs-generated file.
 include!(concat!(env!("OUT_DIR"), "/flash_consts.rs"));
 
-type RawDecoder = PioDccDecoder<'static, PIO0, DMA_CH0, 0>;
+type RawDecoder = PioDccDecoder<'static, PIO0, 0>;
 type AppFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
 
 type Packethandler = Handler<InstantTimer, store::Flash<'static, FLASH, FLASH_SIZE>>;
@@ -61,6 +62,7 @@ type Packethandler = Handler<InstantTimer, store::Flash<'static, FLASH, FLASH_SI
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
     ADC_IRQ_FIFO => adc::InterruptHandler;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>;
 });
 
 // Pinout
@@ -208,12 +210,12 @@ async fn main(spawner: Spawner) {
             ..
         } = Pio::new(dr.pio, Irqs);
 
-        transport::pio_decoder(&mut common, sm0, dr.dcc_input, dr.dma)
+        transport::pio_decoder(&mut common, sm0, dr.dcc_input, dma::Channel::new(dr.dma, Irqs))
     };
 
     let flash = {
         let fr = r.flash;
-        AppFlash::new(fr.flash, fr.dma)
+        AppFlash::new(fr.flash, fr.dma, Irqs)
     };
 
     let mut cv_store =
@@ -258,7 +260,7 @@ async fn main(spawner: Spawner) {
 
         debug!("motor::Config={:?}", config);
 
-        RpMotorController::new(config, r.motor, adc, r.motor_dma.dma)
+        RpMotorController::new(config, r.motor, adc, dma::Channel::new(r.motor_dma.dma, Irqs))
     };
 
     let adc_offset = match unwrap!(cv_store.emf_adc_offset()) {
@@ -352,13 +354,13 @@ async fn main(spawner: Spawner) {
     //         trace!("starting core1");
     //         let executor1 = EXECUTOR1.init(Executor::new());
     //         executor1.run(|spawner| {
-    //             spawner.must_spawn(packet_handler(ph));
+    //             spawner.spawn(packet_handler(ph));
     //         });
     //     },
     // );
 
-    spawner.must_spawn(packet_decoder(/*watchdog,*/ decoder));
-    spawner.must_spawn(packet_handler(ph, fg_handler));
+    spawner.spawn(unwrap!(packet_decoder(/*watchdog,*/ decoder)));
+    spawner.spawn(unwrap!(packet_handler(ph, fg_handler)));
     motor::handler::spawn(
         spawner,
         pid_sample_time

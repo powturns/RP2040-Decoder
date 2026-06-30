@@ -6,7 +6,7 @@ use embassy_rp::adc;
 use embassy_rp::adc::{Adc, Async, Channel};
 use embassy_rp::pwm;
 use embassy_rp::pwm::{Pwm, PwmError, PwmOutput};
-use embassy_rp::{Peri, dma};
+use embassy_rp::dma;
 use embassy_time::{Duration, Timer};
 use embedded_hal::pwm::SetDutyCycle;
 use math::filtered_mean;
@@ -50,25 +50,25 @@ pub struct Config {
     pub emf_r_cutoff: u8,
 }
 
-pub struct RpMotorController<DMA: dma::Channel> {
+pub struct RpMotorController {
     config: Config,
     dir: Direction,
     fwd: DirectionControl,
     rev: DirectionControl,
     adc: Adc<'static, Async>,
-    pub dma: Peri<'static, DMA>,
+    pub dma: dma::Channel<'static>,
     ack_dir: Direction,
     /// Fixed-capacity buffer for EMF samples, reused across measurements. Only the first
     /// `config.emf_samples` entries are used on any given measurement.
     emf_buf: [u16; MAX_EMF_SAMPLES],
 }
 
-impl<DMA: dma::Channel> RpMotorController<DMA> {
+impl RpMotorController {
     pub fn new(
         config: Config,
         resources: MotorResources,
         adc: Adc<'static, Async>,
-        dma: Peri<'static, DMA>,
+        dma: dma::Channel<'static>,
     ) -> Self {
         let mut pwm_config = pwm::Config::default();
         pwm_config.compare_a = 0;
@@ -131,12 +131,12 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
         match self.dir {
             Direction::Forward => {
                 self.fwd
-                    .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+                    .measure_emf(&mut self.adc, buf, &mut self.dma)
                     .await?
             }
             Direction::Reverse => {
                 self.rev
-                    .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+                    .measure_emf(&mut self.adc, buf, &mut self.dma)
                     .await?
             }
         }
@@ -156,7 +156,7 @@ impl<DMA: dma::Channel> RpMotorController<DMA> {
     }
 }
 
-impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
+impl Controller for RpMotorController {
     type Error = Error;
     /// Measures the back emf ADC values when the motor isn't running.
     async fn measure_adc_offset(&mut self) -> Result<u16, Error> {
@@ -169,7 +169,7 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         debug!("Measuring ADC offset in reverse direction. n={}", buf.len());
         let _ = &mut self
             .rev
-            .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+            .measure_emf(&mut self.adc, buf, &mut self.dma)
             .await?;
         let offset_avg_rev = filtered_mean(buf, 2).unwrap_or(0);
         debug!("offset_avg_rev={}", offset_avg_rev);
@@ -178,7 +178,7 @@ impl<DMA: dma::Channel> Controller for RpMotorController<DMA> {
         debug!("Measuring ADC offset in forward direction. n={}", buf.len());
         let _ = &mut self
             .fwd
-            .measure_emf(&mut self.adc, buf, self.dma.reborrow())
+            .measure_emf(&mut self.adc, buf, &mut self.dma)
             .await?;
         let offset_avg_fwd = filtered_mean(buf, 2).unwrap_or(0);
         debug!("offset_avg_fwd={}", offset_avg_fwd);
@@ -252,7 +252,7 @@ impl DirectionControl {
         &mut self,
         adc: &mut Adc<'_, Async>,
         buf: &mut [u16],
-        dma: Peri<'_, impl dma::Channel>,
+        dma: &mut dma::Channel<'_>,
     ) -> Result<(), Error> {
         adc.read_many(
             &mut self.emf,
