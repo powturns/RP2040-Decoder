@@ -197,6 +197,10 @@ impl Controller {
         let setpoint = setpoint.clamp(0.0, self.params.max_setpoint);
         // Dynamic Kp scheduling based on setpoint
         let kp = self.kp_for_setpoint(setpoint);
+        // `config_mut` is deprecated because filter_tc/sample_time changes made through it don't
+        // re-derive the D-term filter. Only Kp changes here, so it's safe, and it avoids the cost
+        // of recomputing the filter coefficients that `set_config` would incur on every tick.
+        #[allow(deprecated)]
         self.pid.config_mut().set_kp(kp)?;
 
         // Compute control output
