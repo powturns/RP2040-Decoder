@@ -1,23 +1,30 @@
-use embassy_rp::dma;
 use fixed::traits::ToFixed;
 
+use dcc_pio_frame::{Frame, FrameAssembler};
 use dcc::transport::{Decoder, RawDccDecoder};
 use embassy_rp::Peri;
 use embassy_rp::gpio::Pull;
 use embassy_rp::pio::program::pio_file;
 use embassy_rp::pio::{
-    Common, Config, Direction as PioDirection, FifoJoin, Instance, LoadedProgram, PioPin,
-    ShiftDirection, StateMachine,
+    Common, Config, Direction as PioDirection, FifoJoin, Instance, Irq, LoadedProgram, PioPin,
+    ShiftDirection, StateMachine, StatusSource,
 };
+
+/// RX FIFO level at which the PIO wakes the CPU in the middle of a long frame.
+///
+/// Words are at least 27 bit times (>= 3.1ms) apart, so the 8 entry FIFO leaves the CPU at
+/// least 4 words (>= 12.5ms) to respond. Frames of up to this many words (12 bytes) wake the
+/// CPU only once, when they end.
+const MID_FRAME_WAKE_LEVEL: u8 = 4;
 
 pub fn pio_decoder<'d, T: Instance, const SM: usize>(
     pio: &mut Common<'d, T>,
     sm: StateMachine<'d, T, SM>,
+    irq: Irq<'d, T, 0>,
     dcc_input: Peri<'d, impl PioPin + 'd>,
-    dma: dma::Channel<'d>,
 ) -> Decoder<PioDccDecoder<'d, T, SM>> {
     let prg = PioDccDecoderProgram::new(pio);
-    let decoder1 = PioDccDecoder::new(pio, sm, dcc_input, dma, &prg);
+    let decoder1 = PioDccDecoder::new(pio, sm, irq, dcc_input, &prg);
 
     Decoder::new(decoder1)
 }
@@ -39,7 +46,10 @@ impl<'a, PIO: Instance> PioDccDecoderProgram<'a, PIO> {
 /// Pio backed DCC decoder.
 pub struct PioDccDecoder<'d, T: Instance, const SM: usize> {
     sm: StateMachine<'d, T, SM>,
-    dma: dma::Channel<'d>,
+    /// Raised by the program when a frame ends (or the FIFO fills mid-frame).
+    irq: Irq<'d, T, 0>,
+    /// Kept across reads so a FIFO overflow is handled even when it straddles two frames.
+    assembler: FrameAssembler,
 }
 
 impl<'d, T: Instance, const SM: usize> PioDccDecoder<'d, T, SM> {
@@ -47,8 +57,8 @@ impl<'d, T: Instance, const SM: usize> PioDccDecoder<'d, T, SM> {
     fn new(
         pio: &mut Common<'d, T>,
         mut sm: StateMachine<'d, T, SM>,
+        irq: Irq<'d, T, 0>,
         dcc_input: Peri<'d, impl PioPin + 'd>,
-        dma: dma::Channel<'d>,
         program: &PioDccDecoderProgram<'d, T>,
     ) -> Self {
         let mut dcc_input = pio.make_pio_pin(dcc_input);
@@ -66,56 +76,69 @@ impl<'d, T: Instance, const SM: usize> PioDccDecoder<'d, T, SM> {
         // The main clock runs at 125MHZ, we want to figure out what to scale that
         // by to make each cycle take 2.5us.
         // 1_000_000 us in a second / 2.5 us = 400_000
-
         cfg.clock_divider = (embassy_rp::clocks::clk_sys_freq() as f64 / 400_000.0).to_fixed();
 
-        // cfg.clock_divider = (U56F8!(125_000_000) / 400_000).to_fixed();
-
+        // The program pushes manually; each word carries a sentinel bit, so the ISR is never
+        // filled to 32 bits and autopush stays off. See dcc::transport::frame for the format.
         cfg.shift_in.direction = ShiftDirection::Left;
-        cfg.shift_in.auto_fill = true;
-        cfg.shift_in.threshold = 32;
+        cfg.shift_in.auto_fill = false;
+
+        // `mov x, status` reads all-ones while the RX FIFO holds fewer than this many words
+        cfg.status_sel = StatusSource::RxFifoLevel;
+        cfg.status_n = MID_FRAME_WAKE_LEVEL;
 
         sm.set_config(&cfg);
         sm.set_enable(true);
 
-        Self { sm, dma }
+        Self {
+            sm,
+            irq,
+            assembler: FrameAssembler::new(),
+        }
     }
 }
 
 impl<'d, T: Instance, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, SM> {
     async fn read<'a>(&mut self, buff: &'a mut [u8]) -> &'a [u8] {
-        assert!(buff.len() >= 8);
-        let rx = self.sm.rx();
+        loop {
+            // Drain before sleeping: words of the next frame may already be queued behind the one
+            // returned last time, and their IRQ may have been consumed with it. The flag is only a
+            // hint; the words themselves mark where frames end.
+            loop {
+                // A push to a full FIFO (the CPU was blocked, e.g. by a flash erase) is dropped and
+                // sets the stall flag. Checked before every pull, so nothing has been pulled since
+                // the drop: the words queued now all precede the gap. The level is read first so
+                // that a drop between the two reads can only undercount, discarding more.
+                let queued = self.sm.rx().level() as usize;
+                if self.sm.rx().stalled() {
+                    debug!("RX FIFO overflow: discarding the frame after {} queued words", queued);
+                    self.assembler.gap_after(queued);
+                }
 
-        let din: &mut [u32] = bytemuck::cast_slice_mut(buff);
-        rx.dma_pull(&mut self.dma, din, true).await;
+                let Some(word) = self.sm.rx().try_pull() else {
+                    break;
+                };
 
-        // The PIO pads every packet to a fixed 8-byte (2-word) output and stores the
-        // number of padding bytes in the final byte; the true length is `7 - padding`.
-        // The count lands at buff[7] because the SM shifts it in LAST under
-        // ShiftDirection::Left with autopush threshold 32, and dma_pull(bswap = true)
-        // places that last-shifted byte at the end of the buffer. It is a register
-        // value (not pin data), so it is NOT inverted like the data bytes below.
-        // Changing the shift direction, threshold, or bswap will move this byte and
-        // silently break length recovery.
-        let padding = buff[7] as usize;
-        if padding > 7 {
-            // Corrupted/garbled packet: saturating_sub yields len 0 and the codec
-            // rejects it as Undersize. Log so the drop is diagnosable instead of silent.
-            debug!("dropping packet: invalid padding count {} (expected 0..=7)", padding);
+                match self.assembler.push(word, buff) {
+                    Frame::Partial => {}
+                    Frame::Complete(len) => {
+                        let buff = &buff[..len];
+
+                        if cfg!(feature = "verbose-transport") {
+                            trace!("{:03} ({:08b})", buff, buff);
+                        }
+
+                        return buff;
+                    }
+                    Frame::Oversize(len) => debug!("dropping frame: length {} too long", len),
+                    Frame::Malformed(word) => {
+                        debug!("dropping frame: malformed word {:#010x}", word)
+                    }
+                    Frame::Overrun => debug!("dropping frame: lost a word to RX FIFO overflow"),
+                }
+            }
+
+            self.irq.wait().await;
         }
-        let len = 7_usize.saturating_sub(padding);
-        let buff = &mut buff[..len];
-
-        // received bytes come inverted off the wire
-        for byte in buff.iter_mut() {
-            *byte = !*byte;
-        }
-
-        if cfg!(feature = "verbose-transport") {
-            trace!("{:03} ({:08b})", buff, buff,);
-        }
-
-        buff
     }
 }

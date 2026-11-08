@@ -7,10 +7,10 @@ name = "DCC-RP2040-rs"
 version = "0.1.0"
 dependencies = [
  "assign-resources",
- "bytemuck",
  "cortex-m",
  "cortex-m-rt",
  "dcc",
+ "dcc-pio-frame",
  "defmt 1.2.0",
  "defmt-rtt",
  "embassy-executor",
@@ -323,11 +323,17 @@ name = "dcc"
 version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
- "bytemuck",
  "defmt 1.2.0",
  "heapless",
  "int-enum",
  "motor",
+]
+
+[[package]]
+name = "dcc-pio-frame"
+version = "0.1.0"
+dependencies = [
+ "defmt 1.2.0",
 ]
 
 [[package]]

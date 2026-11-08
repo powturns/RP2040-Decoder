@@ -4,6 +4,11 @@ use codec::DccCodec;
 pub mod codec;
 pub mod packet;
 
+/// Largest frame accepted, in bytes, including error detection bytes.
+///
+/// S-9.2.1.1 section 2.1 limits address partitions 253 and 254 to 32 bytes.
+pub const MAX_FRAME_LEN: usize = 32;
+
 pub struct Decoder<D: RawDccDecoder> {
     inner: D,
 }
@@ -14,11 +19,10 @@ impl<D: RawDccDecoder> Decoder<D> {
     }
 
     pub async fn read(&mut self) -> Packet {
-        let mut buff = [0u32; 2];
-        let aligned_buff = bytemuck::bytes_of_mut(&mut buff);
+        let mut buff = [0u8; MAX_FRAME_LEN];
 
         loop {
-            let data = self.inner.read(aligned_buff).await;
+            let data = self.inner.read(&mut buff).await;
 
             match DccCodec::decode(data) {
                 Ok(p) => match p {
@@ -39,9 +43,10 @@ impl<D: RawDccDecoder> Decoder<D> {
 
 /// Implementors of this trait can read raw DCC packets.
 pub trait RawDccDecoder {
-    /// Read a DCC packet using the specified buffer.
+    /// Read a raw DCC frame (all bytes between the packet start and end bits, including
+    /// error detection bytes) into the specified buffer.
     ///
-    /// The buffer must be at least 8 bytes long and aligned to a 4 byte boundary.
+    /// The buffer is [MAX_FRAME_LEN] bytes long; longer frames are discarded.
     fn read<'a>(&mut self, buff: &'a mut [u8]) -> impl Future<Output = &'a [u8]>;
 }
 

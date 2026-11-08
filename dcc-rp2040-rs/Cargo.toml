@@ -1,7 +1,12 @@
 [workspace]
 resolver = "2"
 
-members = ["application", "dcc", "math", "motor"]
+members = ["application", "dcc", "dcc-pio-frame", "math", "motor"]
+
+# Dependencies used by more than one member
+[workspace.dependencies]
+defmt = "1.2.0"
+motor = { path = "motor" }
 
 [profile.dev]
 debug = 2

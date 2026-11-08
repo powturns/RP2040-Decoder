@@ -29,6 +29,7 @@ pub enum Error {
 /// A valid DCC packet.
 #[derive(Eq, PartialEq, Clone)]
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
 pub struct Packet {
     pub(crate) data: Vec<u8, 6>,
 }

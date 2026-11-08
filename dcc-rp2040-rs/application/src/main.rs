@@ -39,7 +39,7 @@ use embassy_rp::adc;
 use embassy_rp::adc::Adc;
 use embassy_rp::dma;
 use embassy_rp::flash::{Async, FLASH_BASE, Flash};
-use embassy_rp::peripherals::{DMA_CH0, DMA_CH1, DMA_CH2, FLASH, PIO0};
+use embassy_rp::peripherals::{DMA_CH1, DMA_CH2, FLASH, PIO0};
 use embassy_rp::pio;
 use embassy_rp::pio::Pio;
 use embassy_rp::{Peri, bind_interrupts, peripherals};
@@ -62,7 +62,7 @@ type Packethandler = Handler<InstantTimer, store::Flash<'static, FLASH, FLASH_SI
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
     ADC_IRQ_FIFO => adc::InterruptHandler;
-    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH0>, dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>;
+    DMA_IRQ_0 => dma::InterruptHandler<DMA_CH1>, dma::InterruptHandler<DMA_CH2>;
 });
 
 // Pinout
@@ -81,7 +81,6 @@ assign_resources! {
     pio_decoder: PioDecoderResources {
         pio: PIO0,
         dcc_input: PIN_21,
-        dma: DMA_CH0,
     }
     motor: MotorResources {
         fwd_pin: PIN_23,
@@ -206,11 +205,12 @@ async fn main(spawner: Spawner) {
     let decoder = {
         let Pio {
             mut common,
-            sm0, /*sm1,*/
+            irq0,
+            sm0,
             ..
         } = Pio::new(dr.pio, Irqs);
 
-        transport::pio_decoder(&mut common, sm0, dr.dcc_input, dma::Channel::new(dr.dma, Irqs))
+        transport::pio_decoder(&mut common, sm0, irq0, dr.dcc_input)
     };
 
     let flash = {
