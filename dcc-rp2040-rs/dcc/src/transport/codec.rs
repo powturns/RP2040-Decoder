@@ -109,7 +109,11 @@ fn crc8(data: &[u8]) -> u8 {
     data.iter().fold(0u8, |mut crc, &byte| {
         crc ^= byte;
         for _ in 0..8 {
-            crc = if crc & 1 != 0 { (crc >> 1) ^ 0x8C } else { crc >> 1 };
+            crc = if crc & 1 != 0 {
+                (crc >> 1) ^ 0x8C
+            } else {
+                crc >> 1
+            };
         }
         crc
     })
@@ -169,7 +173,10 @@ mod tests {
         // fix up the XOR so only the CRC is wrong
         let last = frame.len() - 1;
         frame[last] ^= 0x01;
-        assert_eq!(check_advanced_extended(&frame), Err(PacketError::InvalidChecksum));
+        assert_eq!(
+            check_advanced_extended(&frame),
+            Err(PacketError::InvalidChecksum)
+        );
     }
 
     #[test]
@@ -177,7 +184,10 @@ mod tests {
         let mut frame = aepf(&[0xFD, 1, 2, 3, 4, 5, 6]);
         let last = frame.len() - 1;
         frame[last] ^= 0x01;
-        assert_eq!(check_advanced_extended(&frame), Err(PacketError::InvalidChecksum));
+        assert_eq!(
+            check_advanced_extended(&frame),
+            Err(PacketError::InvalidChecksum)
+        );
     }
 
     #[test]
@@ -185,7 +195,10 @@ mod tests {
         // 6 data bytes + XOR, without a CRC-8: forbidden by S-9.2.1.1 section 2.1
         let mut frame = [0xFD, 1, 2, 3, 4, 5].to_vec();
         frame.push(xor(&frame));
-        assert_eq!(check_advanced_extended(&frame), Err(PacketError::InvalidChecksum));
+        assert_eq!(
+            check_advanced_extended(&frame),
+            Err(PacketError::InvalidChecksum)
+        );
     }
 
     #[test]

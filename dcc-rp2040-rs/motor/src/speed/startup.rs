@@ -81,7 +81,10 @@ impl Controller {
             ComputeResult::Output(curr_output)
         } else {
             // we've reached the handover target, save the current output in the buffer for next time
-            debug!("reached PID handover level: measurement={} output={}", measurement, self.output);
+            debug!(
+                "reached PID handover level: measurement={} output={}",
+                measurement, self.output
+            );
             let ff = self.config.pid_ff * self.output as f32;
 
             self.prev_start_output[self.buf_write_idx] = self.output;

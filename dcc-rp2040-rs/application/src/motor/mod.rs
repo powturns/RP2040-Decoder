@@ -4,9 +4,9 @@ use embassy_rp::gpio::Pull;
 
 use embassy_rp::adc;
 use embassy_rp::adc::{Adc, Async, Channel};
+use embassy_rp::dma;
 use embassy_rp::pwm;
 use embassy_rp::pwm::{Pwm, PwmError, PwmOutput};
-use embassy_rp::dma;
 use embassy_time::{Duration, Timer};
 use embedded_hal::pwm::SetDutyCycle;
 use math::filtered_mean;
@@ -189,7 +189,7 @@ impl Controller for RpMotorController {
     async fn acknowledge_cv(&mut self) -> Result<(), Error> {
         self.stop()?;
 
-        let (next_direction, ctrl)  = match self.ack_dir {
+        let (next_direction, ctrl) = match self.ack_dir {
             Direction::Forward => (Direction::Reverse, &mut self.fwd),
             Direction::Reverse => (Direction::Forward, &mut self.rev),
         };

@@ -21,35 +21,39 @@ impl MockStore {
     }
 
     pub(crate) fn with_cv(mut self, cv_id: u16, value: u8) -> Self {
-        if (cv_id as usize) < CV_SIZE {
-            self.cvs[cv_id as usize] = value;
+        let idx = cv_id as usize - 1;
+
+        if idx < CV_SIZE {
+            self.cvs[idx] = value;
         }
         self
     }
 
     pub(crate) fn with_extended_address(mut self, address: u16) -> Self {
-        // Set extended address bit in CV29
-        let cv29 = self.cvs[29] | 0b00100000;
-        self.cvs[29] = cv29;
+        // Set extended address bit in CV29 (remember CVS are 1-indexed, but internally 0 indexed)
+        let cv29 = self.cvs[29 - 1] | 0b00100000;
+        self.cvs[29 - 1] = cv29;
 
         // Set extended address bytes
-        self.cvs[17] = ((address >> 8) & 0x3F) as u8 | 0xC0; // MSB with required bits
-        self.cvs[18] = (address & 0xFF) as u8; // LSB
+        self.cvs[17 - 1] = ((address >> 8) & 0x3F) as u8 | 0xC0; // MSB with required bits
+        self.cvs[18 - 1] = (address & 0xFF) as u8; // LSB
         self
     }
 }
 
 impl Store for MockStore {
     fn read_byte(&self, cv_id: usize) -> Result<u8, Error> {
-        if (cv_id as usize) < CV_SIZE {
-            Ok(self.cvs[cv_id as usize])
+        let idx = cv_id - 1;
+
+        if (idx) < CV_SIZE {
+            Ok(self.cvs[idx])
         } else {
             Ok(0)
         }
     }
 
     fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
-        let start_idx = start as usize;
+        let start_idx = start - 1;
         if start_idx < CV_SIZE && start_idx + len <= CV_SIZE {
             Ok(&self.cvs[start_idx..start_idx + len])
         } else {
@@ -58,8 +62,10 @@ impl Store for MockStore {
     }
 
     fn write_byte(&mut self, cv_id: usize, value: u8) -> Result<(), Error> {
-        if (cv_id as usize) < CV_SIZE {
-            self.cvs[cv_id as usize] = value;
+        let idx = cv_id - 1;
+
+        if idx < CV_SIZE {
+            self.cvs[idx] = value;
             Ok(())
         } else {
             Err(Error::Io)

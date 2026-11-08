@@ -491,10 +491,7 @@ mod tests {
 
         if let OperationModeInstruction::FunctionGroup(fg) = op {
             assert_eq!(fg.group_mask, FunctionGroupFlags::FG_FEATURE_13_20);
-            assert_eq!(
-                fg.flags,
-                FunctionGroupFlags::F13 | FunctionGroupFlags::F20
-            );
+            assert_eq!(fg.flags, FunctionGroupFlags::F13 | FunctionGroupFlags::F20);
         } else {
             panic!("Expected FunctionGroup");
         }
@@ -508,10 +505,7 @@ mod tests {
 
         if let OperationModeInstruction::FunctionGroup(fg) = op {
             assert_eq!(fg.group_mask, FunctionGroupFlags::FG_FEATURE_21_28);
-            assert_eq!(
-                fg.flags,
-                FunctionGroupFlags::F21 | FunctionGroupFlags::F28
-            );
+            assert_eq!(fg.flags, FunctionGroupFlags::F21 | FunctionGroupFlags::F28);
         } else {
             panic!("Expected FunctionGroup");
         }
@@ -526,10 +520,7 @@ mod tests {
 
         if let OperationModeInstruction::FunctionGroup(fg) = op {
             assert_eq!(fg.group_mask, FunctionGroupFlags::FG_FEATURE_29_31);
-            assert_eq!(
-                fg.flags,
-                FunctionGroupFlags::F29 | FunctionGroupFlags::F31
-            );
+            assert_eq!(fg.flags, FunctionGroupFlags::F29 | FunctionGroupFlags::F31);
         } else {
             panic!("Expected FunctionGroup");
         }

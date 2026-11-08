@@ -34,7 +34,7 @@ use ::motor::speed::{
 use assign_resources::assign_resources;
 use dcc::cv::store::{StoreExt, ensure_populated};
 use dcc::handler::{Handler, Op};
-use embassy_executor::{Spawner};
+use embassy_executor::Spawner;
 use embassy_rp::adc;
 use embassy_rp::adc::Adc;
 use embassy_rp::dma;
@@ -260,7 +260,12 @@ async fn main(spawner: Spawner) {
 
         debug!("motor::Config={:?}", config);
 
-        RpMotorController::new(config, r.motor, adc, dma::Channel::new(r.motor_dma.dma, Irqs))
+        RpMotorController::new(
+            config,
+            r.motor,
+            adc,
+            dma::Channel::new(r.motor_dma.dma, Irqs),
+        )
     };
 
     let adc_offset = match unwrap!(cv_store.emf_adc_offset()) {

@@ -28,10 +28,14 @@ impl Config {
 pub fn new_handler<T: Store>(store: &T, resources: FunctionGroupOutputResources) -> Handler {
     let pwm_enabled_mask = unwrap!(store.pwm_enabled_mask());
     let function_map_forward: [u32; 32] = core::array::from_fn(|idx| {
-        unwrap!(unwrap!(store.function_output_mask(idx as u8, Direction::Forward)))
+        unwrap!(unwrap!(
+            store.function_output_mask(idx as u8, Direction::Forward)
+        ))
     });
     let function_map_reverse: [u32; 32] = core::array::from_fn(|idx| {
-        unwrap!(unwrap!(store.function_output_mask(idx as u8, Direction::Reverse)))
+        unwrap!(unwrap!(
+            store.function_output_mask(idx as u8, Direction::Reverse)
+        ))
     });
     let config = Config::new(function_map_forward, function_map_reverse);
 

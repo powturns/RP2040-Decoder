@@ -90,7 +90,10 @@ impl Controller {
         let measurement = (measurement - self.config.adc_offset).max(0.0); // TODO: should we actually clamp this to zero?
 
         if cfg!(feature = "verbose") {
-            trace!("compute(mode={} measurement={} setpoint={})", self.mode, measurement, setpoint);
+            trace!(
+                "compute(mode={} measurement={} setpoint={})",
+                self.mode, measurement, setpoint
+            );
         }
 
         static mut ITERATION_COUNT: u32 = 0;
@@ -108,7 +111,7 @@ impl Controller {
                         trace!("startup(measurement={}) -> output={}", measurement, out);
                     }
                     Ok(Some(out))
-                },
+                }
                 ComputeResult::Handover(ff) => {
                     trace!("Switching to PID mode with feedforward={}", ff);
                     self.mode = Pid(ff);
@@ -121,7 +124,10 @@ impl Controller {
                     .compute(measurement, setpoint as f32, timestamp_ms, ff)?;
 
                 if count % SAMPLE_RATE == 0 {
-                    trace!("pid(measurement={} setpoint={}) -> output={}", measurement, setpoint, out);
+                    trace!(
+                        "pid(measurement={} setpoint={}) -> output={}",
+                        measurement, setpoint, out
+                    );
                 }
 
                 Ok(Some(out))

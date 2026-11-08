@@ -6,7 +6,7 @@ use ::motor::speed::accel;
 use core::cmp::min;
 use embassy_executor::Spawner;
 use embassy_futures::select::{Either, Either3, select, select3};
-use embassy_sync::blocking_mutex::raw::{ThreadModeRawMutex};
+use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::signal::Signal;
 use embassy_time::{Duration, Instant, Timer};

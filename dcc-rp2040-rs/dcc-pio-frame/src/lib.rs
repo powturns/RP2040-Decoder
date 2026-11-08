@@ -181,7 +181,10 @@ mod tests {
 
         let words = [0x09E7_4F81, 0x0B0F_B746];
         assert_eq!(encode(&[0xC3, 0x2C, 0x3F, 0x9E, 0x12, 0x5C]), words);
-        assert_eq!(decode(&words, &mut buf), [Frame::Partial, Frame::Complete(6)]);
+        assert_eq!(
+            decode(&words, &mut buf),
+            [Frame::Partial, Frame::Complete(6)]
+        );
         assert_eq!(&buf[..6], &[0xC3, 0x2C, 0x3F, 0x9E, 0x12, 0x5C]);
     }
 
@@ -202,7 +205,10 @@ mod tests {
     fn back_to_back_frames() {
         let mut buf = [0u8; MAX_FRAME_LEN];
         let mut asm = FrameAssembler::new();
-        for frame in [&[0xC3, 0x2C, 0x3F, 0x9E, 0x12, 0x5C][..], &[0xFF, 0x00, 0xFF][..]] {
+        for frame in [
+            &[0xC3, 0x2C, 0x3F, 0x9E, 0x12, 0x5C][..],
+            &[0xFF, 0x00, 0xFF][..],
+        ] {
             let mut last = Frame::Partial;
             for w in encode(frame) {
                 last = asm.push(w, &mut buf);
@@ -277,7 +283,10 @@ mod tests {
         asm.gap_after(1);
         let mut words = encode(&a);
         words.push(wb[1]);
-        assert_eq!(frames(&mut asm, &words), [Ok(a.to_vec()), Err(Frame::Overrun)]);
+        assert_eq!(
+            frames(&mut asm, &words),
+            [Ok(a.to_vec()), Err(Frame::Overrun)]
+        );
     }
 
     #[test]
@@ -307,7 +316,10 @@ mod tests {
             assert_eq!(asm.push(bad, &mut buf), Frame::Malformed(bad));
         }
         // a fresh frame decodes from the start of the buffer
-        assert_eq!(asm.push(encode(&[9, 8, 1])[0], &mut buf), Frame::Complete(3));
+        assert_eq!(
+            asm.push(encode(&[9, 8, 1])[0], &mut buf),
+            Frame::Complete(3)
+        );
         assert_eq!(&buf[..3], &[9, 8, 1]);
     }
 }

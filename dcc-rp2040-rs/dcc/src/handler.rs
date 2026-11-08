@@ -155,7 +155,8 @@ where
 
                     // clear the extended address mode bit and consist addresses
                     let cv29 = self.store.read_byte(Cv::DecoderConfiguration as usize)?;
-                    self.store.write_byte(Cv::DecoderConfiguration as usize, cv29 & !0b00100000)?;
+                    self.store
+                        .write_byte(Cv::DecoderConfiguration as usize, cv29 & !0b00100000)?;
                     self.store.write_byte(Cv::ConsistAddress as usize, 0)?;
                     return Ok(Some(AcknowledgeCv));
                 }
@@ -188,7 +189,8 @@ where
                     if !(192..=231).contains(&value) || (cv18 == 0 && value == 192) {
                         return Err(PacketError::InvalidInstruction.into());
                     }
-                    self.store.write_byte(Cv::ExtendedAddressMsb as usize, value)?;
+                    self.store
+                        .write_byte(Cv::ExtendedAddressMsb as usize, value)?;
                     return Ok(Some(AcknowledgeCv));
                 }
 
@@ -200,7 +202,8 @@ where
                     if cv17 == 192 && value == 0 {
                         return Err(PacketError::InvalidInstruction.into());
                     }
-                    self.store.write_byte(Cv::ExtendedAddressLsb as usize, value)?;
+                    self.store
+                        .write_byte(Cv::ExtendedAddressLsb as usize, value)?;
                     return Ok(Some(AcknowledgeCv));
                 }
 

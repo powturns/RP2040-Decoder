@@ -1,7 +1,7 @@
 use fixed::traits::ToFixed;
 
-use dcc_pio_frame::{Frame, FrameAssembler};
 use dcc::transport::{Decoder, RawDccDecoder};
+use dcc_pio_frame::{Frame, FrameAssembler};
 use embassy_rp::Peri;
 use embassy_rp::gpio::Pull;
 use embassy_rp::pio::program::pio_file;
@@ -111,7 +111,10 @@ impl<'d, T: Instance, const SM: usize> RawDccDecoder for PioDccDecoder<'d, T, SM
                 // that a drop between the two reads can only undercount, discarding more.
                 let queued = self.sm.rx().level() as usize;
                 if self.sm.rx().stalled() {
-                    debug!("RX FIFO overflow: discarding the frame after {} queued words", queued);
+                    debug!(
+                        "RX FIFO overflow: discarding the frame after {} queued words",
+                        queued
+                    );
                     self.assembler.gap_after(queued);
                 }
 

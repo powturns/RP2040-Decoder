@@ -47,16 +47,16 @@ pub struct PwmConfig {
 /// Implementations of this trait should be optimized for fast reads.
 /// Writes occur very infrequently so can be relatively slow.
 pub trait Store {
-    /// Reads a single configuration variable.
+    /// Reads a single configuration variable from the specified CV address (1-indexed).
     fn read_byte(&self, address: usize) -> Result<u8, Error>;
 
-    /// Reads a range of configuration variables.
+    /// Reads a range of configuration variables from the specified start CV address (1-indexed).
     fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error>;
 
-    /// writes a single configuration variable.
+    /// writes a single configuration variable to the specified CV address (1-indexed).
     fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error>;
 
-    /// Writes a multi-byte configuration value to the specified address.
+    /// Writes a multi-byte configuration value to the specified CV address (1-indexed)
     ///
     /// If `force` is true, the write is persisted even if [value] is present in the store.
     fn write_bytes(&mut self, address: usize, value: &[u8], force: bool) -> Result<(), Error>;
@@ -342,10 +342,10 @@ impl<T: Store> StoreExt for T {
 }
 
 pub fn ensure_populated(store: &mut impl Store) -> Result<(), Error> {
-    let primary_addr = store.addr()?;
+    let primary_addr = store.read_byte(PrimaryAddress as usize)?;
     trace!("ensure_populated(primary_addr={})", primary_addr);
 
-    if primary_addr == 0 {
+    if matches!(primary_addr, 0 | u8::MAX) {
         warn!("CV store is empty. Resetting to default values.");
         reset(store)?;
     }
@@ -430,5 +430,15 @@ mod tests {
             .with_extended_address(1000);
 
         assert_eq!(store.addr().unwrap(), 1000); // Should use extended address
+    }
+
+    #[test]
+    fn test_addr_ensure_populated() {
+        let mut store = MockStore::new().with_cv(Cv::PrimaryAddress as u16, 0);
+
+        ensure_populated(&mut store).unwrap();
+
+        // after a reset we should have the default address of 3
+        assert_eq!(store.addr(), Ok(3));
     }
 }

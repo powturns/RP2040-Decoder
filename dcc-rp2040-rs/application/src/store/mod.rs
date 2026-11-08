@@ -98,13 +98,18 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, FLASH_SIZE> {
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Store for Flash<'d, T, FLASH_SIZE> {
     fn read_byte(&self, address: usize) -> Result<u8, Error> {
-        self.cache.get(address - 1).map(|&byte| byte).ok_or(Error::InvalidAddress)
+        self.cache
+            .get(address - 1)
+            .map(|&byte| byte)
+            .ok_or(Error::InvalidAddress)
     }
 
     fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
         let start_idx = start - 1;
         let end_idx = start_idx + len;
-        self.cache.get(start_idx..end_idx).ok_or(Error::InvalidAddress)
+        self.cache
+            .get(start_idx..end_idx)
+            .ok_or(Error::InvalidAddress)
     }
 
     fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error> {
@@ -123,7 +128,6 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Store for Flash<'d, T, FLASH_SIZE
         }
 
         trace!("writing cv address {}: value={:?}", address, value);
-
 
         self.cache[range].copy_from_slice(value);
         self.sync_cvs()
