@@ -57,6 +57,10 @@ where
 
     /// Handles the packet, returning any operation that needs to be performed.
     pub fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        // must receive two pending service packets in a row with no intervening packets.
+        // Calling take unconditionally ensures any valid packet drops the pending packet.
+        let pending_service_packet = self.pending_service_packet.take();
+
         if packet.is_reset() {
             // we may be entering service mode
             self.enter_service_mode_timer.start();
@@ -67,19 +71,19 @@ where
         {
             self.enter_service_mode_timer.start();
 
-            self.handle_service_mode(packet)
+            self.handle_service_mode(packet, pending_service_packet)
         } else if is_recipient(packet, &self.store) {
             // this packet was specifically addressed to us (not a broadcast)
             self.enter_service_mode_timer.stop();
 
             self.decode_operation_command(packet)
         } else if is_broadcast(packet) {
-            self.decode_operation_command(packet).inspect(|_| {
-                // because we accepted this broadcasted command we must stop the service mode timer
-                self.enter_service_mode_timer.stop();
-            })
+            self.enter_service_mode_timer.stop();
+
+            self.decode_operation_command(packet)
         } else {
             // packet not addressed to us
+            self.enter_service_mode_timer.stop();
             Ok(None)
         }
     }
@@ -104,8 +108,12 @@ where
         }
     }
 
-    fn handle_service_mode(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        if self.pending_service_packet.take().as_ref() != Some(packet) {
+    fn handle_service_mode(
+        &mut self,
+        packet: &Packet,
+        pending: Option<Packet>,
+    ) -> Result<Option<Op>, Error> {
+        if pending.as_ref() != Some(packet) {
             self.pending_service_packet = Some(packet.clone());
             return Ok(None);
         }
@@ -935,6 +943,129 @@ mod tests {
         // Different data — does not match, re-latches, does not write
         assert_eq!(harness.handle(&service_write_packet(20, 0xFF)), Ok(None));
         assert_eq!(harness.read_cv(20), 0x00);
+    }
+
+    // S-9.2.3 §E: a decoder must not execute a Verify or Write unless it has received two
+    // identical service mode packets without any intervening valid packets.
+
+    #[test]
+    fn test_service_write_intervening_reset_does_not_execute() {
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let write = service_write_packet(20, 0xAB);
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.handle(&reset_packet()), Ok(Some(Reset)));
+
+        // the reset dropped the latched packet, so this write latches again
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.read_cv(20), 0x00);
+
+        // a following identical packet with nothing in between executes
+        assert_eq!(harness.handle(&write), Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(20), 0xAB);
+    }
+
+    #[test]
+    fn test_service_verify_intervening_reset_does_not_execute() {
+        let mut harness = TestHarness::with_store(MockStore::new().with_cv(20, 0xAB));
+        harness.enter_service_mode();
+
+        let verify = service_verify_packet(20, 0xAB);
+        assert_eq!(harness.handle(&verify), Ok(None));
+        assert_eq!(harness.handle(&reset_packet()), Ok(Some(Reset)));
+        assert_eq!(harness.handle(&verify), Ok(None));
+    }
+
+    #[test]
+    fn test_service_latch_not_carried_across_sessions() {
+        // A 5-packet verify sequence executes on packets 2 and 4 and latches packet 5. That latch
+        // must not let the first identical packet after the next reset execute on its own.
+        let mut harness = TestHarness::with_store(MockStore::new().with_cv(20, 0xAB));
+        harness.enter_service_mode();
+
+        let verify = service_verify_packet(20, 0xAB);
+        let expected = [None, Some(AcknowledgeCv), None, Some(AcknowledgeCv), None];
+        for (i, expected) in expected.into_iter().enumerate() {
+            assert_eq!(
+                harness.handle(&verify),
+                Ok(expected),
+                "verify packet {}",
+                i + 1
+            );
+        }
+
+        // new session
+        assert_eq!(harness.handle(&reset_packet()), Ok(Some(Reset)));
+        assert_eq!(
+            harness.handle(&verify),
+            Ok(None),
+            "first packet must only latch"
+        );
+        assert_eq!(harness.handle(&verify), Ok(Some(AcknowledgeCv)));
+    }
+
+    #[test]
+    fn test_service_idle_packet_exits_service_mode() {
+        // S-9.2.3 §C.1: any valid non service mode packet exits service mode, including idle.
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let write = service_write_packet(20, 0xAB);
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.handle(&pkt(&[0xFF, 0x00])), Ok(None));
+        assert!(
+            !harness.is_timer_running(),
+            "idle packet should exit service mode"
+        );
+
+        // no longer in service mode, so the writes are not executed
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.read_cv(20), 0x00);
+    }
+
+    #[test]
+    fn test_service_packet_for_other_decoder_exits_service_mode() {
+        let mut harness = TestHarness::with_address(3);
+        harness.enter_service_mode();
+
+        let write = service_write_packet(20, 0xAB);
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(
+            harness.handle(&advanced_speed_step_packet(99, SpeedStep::Idx(10))),
+            Ok(None)
+        );
+        assert!(
+            !harness.is_timer_running(),
+            "non service packet should exit service mode"
+        );
+
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.read_cv(20), 0x00);
+    }
+
+    #[test]
+    fn test_service_latch_dropped_after_timeout() {
+        // The latched packet must not survive leaving service mode via the 20ms timeout.
+        let mut harness = TestHarness::new();
+        harness.enter_service_mode();
+
+        let write = service_write_packet(20, 0xAB);
+        assert_eq!(harness.handle(&write), Ok(None));
+
+        // service mode times out; this packet is ignored and drops the latch
+        harness.set_timer_elapsed(SERVICE_MODE_TIMEOUT_MS + 1);
+        assert_eq!(harness.handle(&write), Ok(None));
+
+        // re-enter service mode: the first write only latches
+        assert_eq!(harness.handle(&reset_packet()), Ok(Some(Reset)));
+        harness.set_timer_elapsed(5);
+        assert_eq!(harness.handle(&write), Ok(None));
+        assert_eq!(harness.read_cv(20), 0x00);
+        assert_eq!(harness.handle(&write), Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(20), 0xAB);
     }
 
     #[test]
