@@ -188,9 +188,10 @@ where
                     // ADC offset Adjustment is triggered when setting CV_7 = 7
                     if packet.cv_data()? == 7 {
                         self.store.emf_adc_offset_clear()?;
+                        return Ok(Some(Reboot));
                     }
 
-                    return Ok(Some(Reboot));
+                    return Ok(None);
                 }
 
                 Cv::ExtendedAddressMsb => {
@@ -945,5 +946,59 @@ mod tests {
         let result = harness.send_two_packets(&packet);
 
         assert_eq!(result, Ok(Some(Reboot)));
+    }
+
+    // CV7 (Manufacturer Version Number) is read only. Writing CV7 = 7 triggers an EMF ADC offset
+    // re-calibration (clears CV172 and reboots). Any other value is ignored (core0.c:285-292).
+    const CV7_VERSION: u8 = 1;
+    const EMF_ADC_OFFSET: u8 = 0x20;
+
+    fn cv7_harness() -> TestHarness {
+        let store = MockStore::new()
+            .with_cv(Cv::ManufacturerVersionNumber as u16, CV7_VERSION)
+            .with_cv(Cv::EmfAdcOffset as u16, EMF_ADC_OFFSET);
+        let mut harness = TestHarness::with_store(store);
+        harness.enter_service_mode();
+        harness
+    }
+
+    #[test]
+    fn test_service_write_cv7_7_clears_adc_offset_and_reboots() {
+        let mut harness = cv7_harness();
+
+        let result = harness.send_two_packets(&service_write_packet(7, 7));
+
+        assert_eq!(result, Ok(Some(Reboot)));
+        assert_eq!(
+            harness.read_cv(Cv::EmfAdcOffset as usize),
+            u8::MAX,
+            "EMF ADC offset should be cleared"
+        );
+        assert_eq!(
+            harness.read_cv(Cv::ManufacturerVersionNumber as usize),
+            CV7_VERSION,
+            "CV7 is read only"
+        );
+    }
+
+    #[test]
+    fn test_service_write_cv7_other_values_ignored() {
+        for value in (0..=u8::MAX).filter(|&v| v != 7) {
+            let mut harness = cv7_harness();
+
+            let result = harness.send_two_packets(&service_write_packet(7, value));
+
+            assert_eq!(result, Ok(None), "CV7 = {value} should not reboot or ack");
+            assert_eq!(
+                harness.read_cv(Cv::EmfAdcOffset as usize),
+                EMF_ADC_OFFSET,
+                "CV7 = {value} should not clear the EMF ADC offset"
+            );
+            assert_eq!(
+                harness.read_cv(Cv::ManufacturerVersionNumber as usize),
+                CV7_VERSION,
+                "CV7 = {value}: CV7 is read only"
+            );
+        }
     }
 }
