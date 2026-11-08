@@ -66,7 +66,7 @@ impl Helper {
             let current_idx = self.current.speed_step.idx();
 
             if accelerating {
-                SpeedStep::Num(if self.config.accel_rate > 0 {
+                SpeedStep::Idx(if self.config.accel_rate > 0 {
                     current_idx + 1
                 } else {
                     // there is no acceleration rate, so jump directly
@@ -75,7 +75,7 @@ impl Helper {
                 })
             } else {
                 // we must be decelerating
-                SpeedStep::Num(if self.config.decel_rate > 0 {
+                SpeedStep::Idx(if self.config.decel_rate > 0 {
                     current_idx - 1
                 } else {
                     // There is no deceleration rate, jump directly
@@ -134,8 +134,8 @@ mod tests {
     fn test_speed_step_idx() {
         assert_eq!(SpeedStep::Stop.idx(), 0);
         assert_eq!(SpeedStep::EmergencyStop.idx(), 0);
-        assert_eq!(SpeedStep::Num(5).idx(), 5);
-        assert_eq!(SpeedStep::Num(126).idx(), 126);
+        assert_eq!(SpeedStep::Idx(5).idx(), 5);
+        assert_eq!(SpeedStep::Idx(126).idx(), 126);
     }
 
     #[test]
@@ -157,7 +157,7 @@ mod tests {
     fn test_set_target() {
         let mut control = Helper::new(default_config());
         let new_target = VelocitySetpoint {
-            speed_step: SpeedStep::Num(50),
+            speed_step: SpeedStep::Idx(50),
             direction: Direction::Forward,
         };
         control.set_target(new_target);
@@ -176,7 +176,7 @@ mod tests {
     fn test_acceleration_with_rate() {
         let mut control = Helper::new(default_config());
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(10),
+            speed_step: SpeedStep::Idx(10),
             direction: Direction::Forward,
         });
 
@@ -191,7 +191,7 @@ mod tests {
     fn test_acceleration_steps_gradually() {
         let mut control = Helper::new(default_config());
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(5),
+            speed_step: SpeedStep::Idx(5),
             direction: Forward,
         });
 
@@ -211,7 +211,7 @@ mod tests {
     fn test_acceleration_without_rate_jumps_immediately() {
         let mut control = Helper::new(config_no_ramp());
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(50),
+            speed_step: SpeedStep::Idx(50),
             direction: Direction::Forward,
         });
 
@@ -225,14 +225,14 @@ mod tests {
 
         // Start at control 10
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(10),
+            speed_step: SpeedStep::Idx(10),
             direction: Direction::Forward,
         };
         control.target = control.current;
 
         // Set target to lower control
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(5),
+            speed_step: SpeedStep::Idx(5),
             direction: Direction::Forward,
         });
 
@@ -247,7 +247,7 @@ mod tests {
 
         // Start at control 5
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(5),
+            speed_step: SpeedStep::Idx(5),
             direction: Forward,
         };
         control.target = control.current;
@@ -275,7 +275,7 @@ mod tests {
         let mut control = Helper::new(config_no_ramp());
 
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(50),
+            speed_step: SpeedStep::Idx(50),
             direction: Direction::Forward,
         };
         control.target = control.current;
@@ -294,7 +294,7 @@ mod tests {
         let mut control = Helper::new(default_config());
 
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(50),
+            speed_step: SpeedStep::Idx(50),
             direction: Direction::Forward,
         };
         control.target = control.current;
@@ -314,14 +314,14 @@ mod tests {
 
         // Start moving forward at control 3
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(3),
+            speed_step: SpeedStep::Idx(3),
             direction: Forward,
         };
         control.target = control.current;
 
         // Request reverse direction
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(3),
+            speed_step: SpeedStep::Idx(3),
             direction: Direction::Reverse,
         });
 
@@ -349,18 +349,18 @@ mod tests {
         let mut control = Helper::new(config_no_ramp());
 
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(50),
+            speed_step: SpeedStep::Idx(50),
             direction: Forward,
         };
         control.target = control.current;
 
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(30),
+            speed_step: SpeedStep::Idx(30),
             direction: Direction::Reverse,
         });
 
         let (current, _) = control.step();
-        assert_eq!(current.speed_step, SpeedStep::Num(30));
+        assert_eq!(current.speed_step, SpeedStep::Idx(30));
         assert_eq!(current.direction, Direction::Reverse);
     }
 
@@ -375,7 +375,7 @@ mod tests {
         control.target = control.current;
 
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(5),
+            speed_step: SpeedStep::Idx(5),
             direction: Direction::Reverse,
         });
 
@@ -401,7 +401,7 @@ mod tests {
         });
 
         control.set_target(VelocitySetpoint {
-            speed_step: SpeedStep::Num(3),
+            speed_step: SpeedStep::Idx(3),
             direction: Direction::Forward,
         });
 
@@ -427,7 +427,7 @@ mod tests {
         });
 
         control.current = VelocitySetpoint {
-            speed_step: SpeedStep::Num(3),
+            speed_step: SpeedStep::Idx(3),
             direction: Direction::Forward,
         };
         control.target = control.current;

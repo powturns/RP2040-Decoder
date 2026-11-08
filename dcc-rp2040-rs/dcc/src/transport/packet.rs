@@ -114,6 +114,10 @@ pub enum OperationInstructionType {
 #[cfg_attr(test, derive(Debug))]
 pub enum OperationModeInstruction {
     AdvancedOperations(AdvancedOperationsInstruction),
+    /// A baseline speed and direction instruction.
+    ///
+    /// Not to be confused with an [AdvancedOperationsInstruction::SpeedStepControl].
+    SpeedAndDirection(VelocitySetpoint),
     FunctionGroup(FunctionGroup),
 }
 
@@ -128,7 +132,7 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
     type Error = Error;
 
     fn try_from(value: &'a Packet) -> Result<Self, Self::Error> {
-        let data = &value.data[value.address_length()?..];
+        let data = value.raw_instruction_data()?;
 
         let first = *data.first().ok_or(Error::Undersize)?;
 
@@ -139,35 +143,16 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
             OperationInstructionType::AdvancedOperations => {
                 match first & 0b00011111 {
                     // 128 Speed Step control
-                    0b11111 => {
-                        let speed_vector = data.get(1).ok_or(Error::Undersize)?;
-
-                        let direction = match (speed_vector & 0b10000000) >> 7 {
-                            0 => Direction::Reverse,
-                            1 => Direction::Forward,
-                            _ => return Err(Error::InvalidInstruction),
-                        };
-
-                        // mask out the direction
-                        let speed = speed_vector & 0b01111111;
-                        let speed_step = match speed {
-                            0 => SpeedStep::Stop,
-                            0b0000001 => SpeedStep::EmergencyStop,
-                            _ => SpeedStep::Num(speed - 1),
-                        };
-
-                        Ok(OperationModeInstruction::AdvancedOperations(
-                            AdvancedOperationsInstruction::SpeedStepControl(VelocitySetpoint {
-                                speed_step,
-                                direction,
-                            }),
-                        ))
-                    }
+                    0b11111 => decode_128_speed_step(data),
                     _ => Err(Error::InvalidInstruction),
                 }
             }
-            OperationInstructionType::SpeedDirectionReverse => Err(Error::InvalidInstruction),
-            OperationInstructionType::SpeedDirectionForward => Err(Error::InvalidInstruction),
+            OperationInstructionType::SpeedDirectionReverse => {
+                decode_speed_direction(data, Direction::Reverse)
+            }
+            OperationInstructionType::SpeedDirectionForward => {
+                decode_speed_direction(data, Direction::Forward)
+            }
             OperationInstructionType::FunctionGroup1 => {
                 Ok(OperationModeInstruction::FunctionGroup(parse_fg1(first)))
             }
@@ -183,6 +168,57 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
             OperationInstructionType::CVAccess => Err(Error::InvalidInstruction),
         }
     }
+}
+
+/// Decodes an advanced operations 128-speed step control.
+fn decode_128_speed_step(data: &[u8]) -> Result<OperationModeInstruction, Error> {
+    let speed_vector = data.get(1).ok_or(Error::Undersize)?;
+
+    // decode the direction from the upper bit
+    let direction = match (speed_vector & 0b10000000) >> 7 {
+        0 => Direction::Reverse,
+        1 => Direction::Forward,
+        _ => unreachable!("unable to decode direction"),
+    };
+
+    // mask out the direction
+    let speed = speed_vector & 0b01111111;
+    let speed_step = match speed {
+        0 => SpeedStep::Stop,
+        0b0000001 => SpeedStep::EmergencyStop,
+        _ => SpeedStep::Idx(speed - 1),
+    };
+
+    Ok(OperationModeInstruction::AdvancedOperations(
+        AdvancedOperationsInstruction::SpeedStepControl(VelocitySetpoint {
+            speed_step,
+            direction,
+        }),
+    ))
+}
+
+/// Decodes the payload from the baseline speed (14/28-step) & direction instruction (010/011).
+/// Currently only handles stop / emergency stop, not individual speed steps.
+fn decode_speed_direction(
+    data: &[u8],
+    direction: Direction,
+) -> Result<OperationModeInstruction, Error> {
+    let data = *data.first().ok_or(Error::Undersize)?;
+
+    // TODO: check CV29 bit 1 to determine if bit 4 is for FL. For now we assume its a speed step
+    let speed_step = if data & 0b000_01111 == 0 {
+        // stop is 00000 or 10000
+        SpeedStep::Stop
+    } else if data & 0b000_01111 == 1 {
+        // Emergency stop is 00001 or 10001
+        SpeedStep::EmergencyStop
+    } else {
+        return Err(Error::InvalidInstruction);
+    };
+
+    Ok(OperationModeInstruction::SpeedAndDirection(
+        VelocitySetpoint::new(speed_step, direction),
+    ))
 }
 
 fn parse_fg1(instruction: u8) -> FunctionGroup {
@@ -653,17 +689,90 @@ mod tests {
 
             assert_eq!(
                 Ok(OperationModeInstruction::AdvancedOperations(
-                    SpeedStepControl(VelocitySetpoint::new(SpeedStep::Num(1), direction))
+                    SpeedStepControl(VelocitySetpoint::new(SpeedStep::Idx(1), direction))
                 )),
                 OperationModeInstruction::try_from(&pkt(&[3, 0b00111111, 0b00000010 + dir]))
             );
 
             assert_eq!(
                 Ok(OperationModeInstruction::AdvancedOperations(
-                    SpeedStepControl(VelocitySetpoint::new(SpeedStep::Num(126), direction))
+                    SpeedStepControl(VelocitySetpoint::new(SpeedStep::Idx(126), direction))
                 )),
                 OperationModeInstruction::try_from(&pkt(&[3, 0b00111111, 0b01111111 + dir]))
             );
+        }
+    }
+
+    // Baseline speed and direction instruction: 01DCSSSS (S-9.2 §B, S-9.2.1 §2.3.3).
+    // Decoding is address-independent, so cover both broadcast (0) and a basic address (3).
+    const SPEED_DIRECTION_ADDRESSES: [u8; 2] = [0, 3];
+
+    fn speed_direction_instruction(direction: Direction, c: u8, speed: u8) -> u8 {
+        let d = match direction {
+            Direction::Forward => 1,
+            Direction::Reverse => 0,
+        };
+        0b0100_0000 | (d << 5) | (c << 4) | speed
+    }
+
+    #[test]
+    fn operation_mode_instruction_speed_direction_stop() {
+        // CSSSS = x0000 is stop, regardless of C (intermediate speed step bit or FL).
+        for addr in SPEED_DIRECTION_ADDRESSES {
+            for direction in [Direction::Forward, Direction::Reverse] {
+                for c in 0..=1u8 {
+                    let instruction = speed_direction_instruction(direction, c, 0b0000);
+
+                    assert_eq!(
+                        Ok(OperationModeInstruction::SpeedAndDirection(
+                            VelocitySetpoint::new(SpeedStep::Stop, direction)
+                        )),
+                        OperationModeInstruction::try_from(&pkt(&[addr, instruction])),
+                        "address {addr}, instruction {instruction:#010b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn operation_mode_instruction_speed_direction_emergency_stop() {
+        // CSSSS = x0001 is emergency stop, regardless of C.
+        for addr in SPEED_DIRECTION_ADDRESSES {
+            for direction in [Direction::Forward, Direction::Reverse] {
+                for c in 0..=1u8 {
+                    let instruction = speed_direction_instruction(direction, c, 0b0001);
+
+                    assert_eq!(
+                        Ok(OperationModeInstruction::SpeedAndDirection(
+                            VelocitySetpoint::new(SpeedStep::EmergencyStop, direction)
+                        )),
+                        OperationModeInstruction::try_from(&pkt(&[addr, instruction])),
+                        "address {addr}, instruction {instruction:#010b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn operation_mode_instruction_speed_direction_speed_steps_unsupported() {
+        // CSSSS = x0010..=x1111 are the 28 speed steps (or 14 steps + FL). These are not
+        // supported yet, so they must be rejected rather than decoded as stop / emergency stop.
+        for addr in SPEED_DIRECTION_ADDRESSES {
+            for direction in [Direction::Forward, Direction::Reverse] {
+                for c in 0..=1u8 {
+                    for speed in 0b0010..=0b1111u8 {
+                        let instruction = speed_direction_instruction(direction, c, speed);
+
+                        assert_eq!(
+                            Err(Error::InvalidInstruction),
+                            OperationModeInstruction::try_from(&pkt(&[addr, instruction])),
+                            "address {addr}, instruction {instruction:#010b}"
+                        );
+                    }
+                }
+            }
         }
     }
 }

@@ -7,7 +7,7 @@ use crate::transport::packet::{
     ServiceInstructionType, ServicePacket,
 };
 use crate::{FunctionGroup, FunctionGroupFlags, Timer, is_broadcast, is_recipient};
-use motor::VelocitySetpoint;
+use motor::{SpeedStep, VelocitySetpoint};
 
 const SERVICE_MODE_TIMEOUT_MS: usize = 20;
 
@@ -72,22 +72,35 @@ where
             // this packet was specifically addressed to us (not a broadcast)
             self.enter_service_mode_timer.stop();
 
-            self.handle_command(packet)
+            self.decode_operation_command(packet)
         } else if is_broadcast(packet) {
-            // TODO: should we handle packets that are broadcast?
-            self.handle_command(packet)
+            self.decode_operation_command(packet).inspect(|_| {
+                // because we accepted this broadcasted command we must stop the service mode timer
+                self.enter_service_mode_timer.stop();
+            })
         } else {
             // packet not addressed to us
             Ok(None)
         }
     }
 
-    fn handle_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+    /// decodes the operation command.
+    fn decode_operation_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         match OperationModeInstruction::try_from(packet)? {
             OperationModeInstruction::AdvancedOperations(o) => match o {
                 AdvancedOperationsInstruction::SpeedStepControl(v) => Ok(Some(Op::Velocity128(v))),
             },
             OperationModeInstruction::FunctionGroup(fg) => Ok(Some(Op::SetFunctions(fg))),
+            OperationModeInstruction::SpeedAndDirection(v) => {
+                if matches!(v.speed_step, SpeedStep::Stop | SpeedStep::EmergencyStop) {
+                    Ok(Some(Op::Velocity128(v)))
+                } else {
+                    // We're only supporting the Speed and direction instruction for stop / emergency
+                    // stop (for broadcast support). Using it for a Speed step index would be invalid
+                    // because we return a Velocity128, when it would have to be a velocity14/28.
+                    Err(Error::Packet(PacketError::InvalidInstruction))
+                }
+            }
         }
     }
 
@@ -349,7 +362,7 @@ mod tests {
         let instruction = match speed_step {
             SpeedStep::Stop => 0b00000000,
             SpeedStep::EmergencyStop => 0b00000001,
-            SpeedStep::Num(n) => n + 1, // add one to account for emergency stop being 1
+            SpeedStep::Idx(n) => n + 1, // add one to account for emergency stop being 1
         };
         operation_packet(addr, &[0b00111111, instruction])
     }
@@ -413,6 +426,10 @@ mod tests {
 
         fn start_timer(&mut self) {
             self.handler.enter_service_mode_timer.start();
+        }
+
+        fn is_timer_running(&self) -> bool {
+            self.handler.enter_service_mode_timer.running
         }
 
         fn enter_service_mode(&mut self) {
@@ -555,13 +572,13 @@ mod tests {
     fn test_operation_mode_basic_address() {
         let mut harness = TestHarness::with_address(3);
 
-        let packet = advanced_speed_step_packet(3, SpeedStep::Num(50));
+        let packet = advanced_speed_step_packet(3, SpeedStep::Idx(50));
         let result = harness.handle(&packet);
 
         assert_eq!(
             result,
             Ok(Some(Op::Velocity128(VelocitySetpoint {
-                speed_step: SpeedStep::Num(50),
+                speed_step: SpeedStep::Idx(50),
                 direction: Direction::Reverse,
             })))
         );
@@ -571,13 +588,13 @@ mod tests {
     fn test_operation_mode_extended_address() {
         let mut harness = TestHarness::with_extended_address(5000);
 
-        let packet = advanced_speed_step_packet(5000, SpeedStep::Num(100));
+        let packet = advanced_speed_step_packet(5000, SpeedStep::Idx(100));
         let result = harness.handle(&packet);
 
         assert_eq!(
             result,
             Ok(Some(Op::Velocity128(VelocitySetpoint {
-                speed_step: SpeedStep::Num(100),
+                speed_step: SpeedStep::Idx(100),
                 direction: Direction::Reverse,
             })))
         );
@@ -615,12 +632,126 @@ mod tests {
         );
     }
 
+    // Broadcast handling (S-9.2 §B, S-9.2.1 §2.2): address 0 is the broadcast address, and the
+    // Broadcast Stop packet is required for decoders.
+
+    /// Asserts the result is a velocity op with the given speed step. Direction is not checked:
+    /// S-9.2 and S-9.2.1 allow decoders to ignore the direction in a broadcast stop.
+    fn assert_velocity_step(result: Result<Option<Op>, Error>, expected: SpeedStep) {
+        match result {
+            Ok(Some(Op::Velocity128(v))) => assert_eq!(v.speed_step, expected),
+            other => panic!("expected Velocity128 with {expected:?}, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn test_broadcast_128_step_stop() {
+        let mut harness = TestHarness::with_address(3);
+
+        let result = harness.handle(&advanced_speed_step_packet(0, SpeedStep::Stop));
+
+        assert_velocity_step(result, SpeedStep::Stop);
+    }
+
+    #[test]
+    fn test_broadcast_128_step_emergency_stop() {
+        let mut harness = TestHarness::with_address(3);
+
+        let result = harness.handle(&advanced_speed_step_packet(0, SpeedStep::EmergencyStop));
+
+        assert_velocity_step(result, SpeedStep::EmergencyStop);
+    }
+
+    #[test]
+    fn test_broadcast_stop_packet() {
+        // S-9.2 Broadcast Stop: 00000000 01DC000S, S = 0 -> bring the locomotive to a stop.
+        // Must work for every value of the D and C bits.
+        for dc in 0..=0b11u8 {
+            let mut harness = TestHarness::with_address(3);
+            let instruction = 0b0100_0000 | (dc << 4);
+
+            let result = harness.handle(&operation_packet(0, &[instruction]));
+
+            assert_velocity_step(result, SpeedStep::Stop);
+        }
+    }
+
+    #[test]
+    fn test_broadcast_speed_step() {
+        // ensure we don't respond to any of the other broadcast speed steps for now.
+        // 01DCSSSS: the 28 speed steps are CSSSS = x0010..=x1111 (S-9.2 §B), for both
+        // directions (D). SSSS = 0000 / 0001 are stop / emergency stop and are tested separately.
+        for d in 0..=1u8 {
+            for c in 0..=1u8 {
+                for speed in 0b0010..=0b1111u8 {
+                    let mut harness = TestHarness::with_address(3);
+                    let instruction = 0b0100_0000 | (d << 5) | (c << 4) | speed;
+
+                    let result = harness.handle(&operation_packet(0, &[instruction]));
+
+                    assert_eq!(
+                        result,
+                        Err(Error::Packet(PacketError::InvalidInstruction)),
+                        "instruction {instruction:#010b}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn test_broadcast_emergency_stop_packet() {
+        // S-9.2 Broadcast Stop: 00000000 01DC000S, S = 1 -> stop delivering energy to the motor.
+        for dc in 0..=0b11u8 {
+            let mut harness = TestHarness::with_address(3);
+            let instruction = 0b0100_0001 | (dc << 4);
+
+            let result = harness.handle(&operation_packet(0, &[instruction]));
+
+            assert_velocity_step(result, SpeedStep::EmergencyStop);
+        }
+    }
+
+    #[test]
+    fn test_broadcast_stop_with_extended_address() {
+        // Broadcast applies regardless of the decoder's addressing mode.
+        let mut harness = TestHarness::with_extended_address(5000);
+
+        let result = harness.handle(&advanced_speed_step_packet(0, SpeedStep::EmergencyStop));
+
+        assert_velocity_step(result, SpeedStep::EmergencyStop);
+    }
+
+    #[test]
+    fn test_broadcast_stop_with_service_mode_timer_running() {
+        // A broadcast stop shortly after a reset is not a service mode candidate (address 0 is
+        // outside 112..=127) and must still be executed.
+        let mut harness = TestHarness::with_address(3);
+        harness.enter_service_mode();
+
+        let result = harness.handle(&advanced_speed_step_packet(0, SpeedStep::EmergencyStop));
+
+        assert_velocity_step(result, SpeedStep::EmergencyStop);
+        assert!(!harness.is_timer_running())
+    }
+
+    #[test]
+    fn test_broadcast_reset_is_still_reset() {
+        // 00000000 00000000 is the broadcast Digital Decoder Reset, not a speed instruction.
+        let mut harness = TestHarness::with_address(3);
+
+        assert_eq!(
+            harness.handle(&operation_packet(0, &[0x00])),
+            Ok(Some(Reset))
+        );
+    }
+
     #[test]
     fn test_packet_not_for_us() {
         let mut harness = TestHarness::with_address(3);
 
         // Send packet addressed to different decoder
-        let packet = advanced_speed_step_packet(99, SpeedStep::Num(50));
+        let packet = advanced_speed_step_packet(99, SpeedStep::Idx(50));
         let result = harness.handle(&packet);
 
         assert_eq!(result, Ok(None));

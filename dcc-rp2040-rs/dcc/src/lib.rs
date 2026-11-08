@@ -14,7 +14,7 @@ pub mod transport;
 #[cfg(test)]
 mod testing;
 
-const BROADCAST_ADDRESS: u16 = 0xFFFF;
+const BROADCAST_ADDRESS: u16 = 0;
 
 /// Reads the extended address from the start of the given data.
 ///
@@ -148,5 +148,32 @@ bitflags! {
 impl defmt::Format for FunctionGroupFlags {
     fn format(&self, fmt: defmt::Formatter) {
         defmt::write!(fmt, "FunctionGroups({:032b})", self.bits())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(test)]
+    extern crate std;
+
+    use crate::is_broadcast;
+    use crate::transport::packet::Packet;
+    use heapless::Vec;
+
+    #[test]
+    fn test_is_broadcast() {
+        // emergency stop packet
+        let stop_packet = Packet {
+            data: Vec::from_slice(&[0, 0b00000001]).unwrap(),
+        };
+
+        assert_eq!(is_broadcast(&stop_packet), true);
+
+        // normal addr 3 packet:
+        let packet = Packet {
+            data: Vec::from_slice(&[0x03, 0x3F, 0x3C]).unwrap(),
+        };
+
+        assert_eq!(is_broadcast(&packet), false);
     }
 }

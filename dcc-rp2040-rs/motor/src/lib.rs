@@ -16,7 +16,7 @@ pub enum Direction {
 pub enum SpeedStep {
     Stop,
     EmergencyStop,
-    Num(u8),
+    Idx(u8),
 }
 
 impl SpeedStep {
@@ -24,7 +24,7 @@ impl SpeedStep {
     pub fn idx(&self) -> u8 {
         match self {
             SpeedStep::Stop | SpeedStep::EmergencyStop => 0,
-            SpeedStep::Num(n) => *n,
+            SpeedStep::Idx(n) => *n,
         }
     }
 }
