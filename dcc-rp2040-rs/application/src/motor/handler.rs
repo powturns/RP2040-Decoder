@@ -226,6 +226,10 @@ async fn accel_helper_task(mut accel_helper: accel::Helper, speed_table: SpeedTa
                 Command::AcknowledgeCv => { /*noop*/ }
                 Command::Reset => {
                     accel_helper.reset();
+
+                    // reset the motor speed channel to stopped to ensure the previous_setpoint
+                    // value is accurate
+                    maybe_send_to_channel(VelocitySetpoint::default());
                     accel_timer = Timer::at(INSTANT_MAX_FIXED);
                 }
                 Command::SetVelocity128(v) => {
