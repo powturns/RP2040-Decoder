@@ -83,88 +83,75 @@ async fn motor_driver_task(
     mut speed_control: SpeedController,
 ) {
     trace!("starting motor driver task");
+
+    /// Measures the back emf, computes the new output and applies it.
+    ///
+    /// `tick` is the scheduled time of this control step, not the current time. The speed
+    /// controller is a fixed-rate discrete controller: it always assumes one sample period
+    /// between steps, and skips a step if its timestamp is less than one sample period after the
+    /// previous one. Passing the scheduled time means jitter in when a step actually runs can
+    /// never cause a step to be skipped.
     async fn compute_and_set_output(
         motor_driver: &mut RpMotorDriver,
         speed_control: &mut SpeedController,
         level: OutputLevel,
+        tick: Instant,
     ) -> Result<(), Error> {
         let bemf = motor_driver.measure().await?;
 
-        let output =
-            speed_control.compute(bemf, level.setpoint as u32, Instant::now().as_millis())?;
-
-        // trace!("bemf={}, output={}", bemf, output);
+        let output = speed_control.compute(bemf, level.setpoint as u32, tick.as_millis())?;
 
         motor_driver.set_output_level(output, level.dir)?;
 
         Ok(())
     }
 
-    let mut pid_sample_timer: Timer = Timer::at(Instant::MAX);
-    let mut last_output_level = OutputLevel {
+    let mut output_level = OutputLevel {
         dir: Direction::Forward,
         setpoint: 0,
     };
 
-    let mut set_output = async |new_output_level: Option<OutputLevel>,
-                                motor_driver: &mut RpMotorDriver,
-                                speed_control: &mut SpeedController,
-                                pid_sample_timer: &mut Timer| {
-        let dir_changed: bool;
-
-        if let Some(new_output_level) = new_output_level {
-            dir_changed = motor_driver.dir != new_output_level.dir;
-
-            last_output_level = new_output_level;
-        } else {
-            dir_changed = false;
-        }
-
-        if last_output_level.setpoint != 0 && !dir_changed {
-            // normal running operation: set the output
-            let _ = compute_and_set_output(motor_driver, speed_control, last_output_level)
-                .await
-                .inspect_err(|e| error!("error setting output: {:?}", e));
-        } else {
-            // the setpoint is zero, or we just changed direction. Reset the speed controller
-            // and stop the motor. Use set_output_level so the new direction is set.
-            speed_control.reset();
-            let _ = motor_driver
-                .set_output_level(0, last_output_level.dir)
-                .inspect_err(|e| error!("error stopping motor: {:?}", e));
-        }
-
-        if last_output_level.setpoint != 0 {
-            // normal running operation
-            *pid_sample_timer = Timer::after(pid_sample_time);
-        } else {
-            // if the setpoint is zero, wait until we get a command changing the
-            // setpoint before resuming PID sampling
-            *pid_sample_timer = Timer::at(Instant::MAX);
-        }
-    };
+    // Scheduled time of the next control step, or None when the motor is stopped. Steps are
+    // scheduled at a fixed rate (`next_tick += pid_sample_time`), so the time spent measuring and
+    // computing doesn't stretch the sample period. The scheduled times are also the timestamps
+    // passed to the speed controller, so they must only ever increase by at least one period.
+    let mut next_tick: Option<Instant> = None;
 
     loop {
+        let tick_timer = Timer::at(next_tick.unwrap_or(Instant::MAX));
+
         match select3(
             MOTOR_SPEED_CHANNEL.wait(),
             MOTOR_DRIVER_CHANNEL.receive(),
-            &mut pid_sample_timer,
+            tick_timer,
         )
         .await
         {
             Either3::First(level) => {
                 trace!("MOTOR_SPEED_CHANNEL: level={:?}", level);
 
-                Timer::after(Duration::from_millis(1)).await;
+                let dir_changed = motor_driver.dir != level.dir;
+                output_level = level;
 
-                // output level changed
-                set_output(
-                    Some(level),
-                    &mut motor_driver,
-                    &mut speed_control,
-                    &mut pid_sample_timer,
-                )
-                .await;
+                if output_level.setpoint == 0 || dir_changed {
+                    // The setpoint is zero, or we just changed direction. Reset the speed
+                    // controller and stop the motor immediately. Use set_output_level so the new
+                    // direction is set.
+                    speed_control.reset();
+                    let _ = motor_driver
+                        .set_output_level(0, output_level.dir)
+                        .inspect_err(|e| error!("error stopping motor: {:?}", e));
+                }
+
+                if output_level.setpoint == 0 {
+                    // Don't run the tick timer until the setpoint changes off of zero.
+                    next_tick = None;
+                } else if next_tick.is_none() {
+                    // The setpoint is non-zero, but the tick timer is not running. The motor
+                    // was previously stopped. Now that we're running, we need to ensure we're
+                    // sampling the BEMF and adjusting accordingly.
+                    next_tick = Some(Instant::now() + pid_sample_time);
+                }
             }
             Either3::Second(c) => match c {
                 // command received via a packet
@@ -174,7 +161,7 @@ async fn motor_driver_task(
                         .await
                         .inspect_err(|e| error!("error acknowledging cv: {:?}", e));
 
-                    pid_sample_timer = Timer::at(Instant::MAX);
+                    next_tick = None;
                 }
                 Command::Reset => {
                     let _ = motor_driver
@@ -183,21 +170,39 @@ async fn motor_driver_task(
 
                     speed_control.reset();
 
-                    pid_sample_timer = Timer::at(Instant::MAX);
+                    next_tick = None;
                 }
                 Command::SetVelocity128(_) => {
                     // noop - handled by the speed channel
                 }
             },
             Either3::Third(_) => {
-                // pid timer timeout
-                set_output(
-                    None,
+                // Control step. The timer only runs while the setpoint is non-zero.
+                let Some(tick) = next_tick else { continue };
+
+                let _ = compute_and_set_output(
                     &mut motor_driver,
                     &mut speed_control,
-                    &mut pid_sample_timer,
+                    output_level,
+                    tick,
                 )
-                .await;
+                .await
+                .inspect_err(|e| error!("error setting output: {:?}", e));
+
+                let mut tick_candidate = tick + pid_sample_time;
+                let now = Instant::now();
+                if tick_candidate <= now {
+                    // the tick candidate is in the past! This means the executor was doing too
+                    // much work and couldn't execute the tick within the sample period.
+                    // Instead of executing the (late) tick immediately, skip it and schedule
+                    // a new one after a full period.
+                    warn!(
+                        "motor control step late by {}us",
+                        (now - tick_candidate).as_micros()
+                    );
+                    tick_candidate = now + pid_sample_time;
+                }
+                next_tick = Some(tick_candidate);
             }
         }
     }

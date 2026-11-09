@@ -76,6 +76,14 @@ impl Controller {
     }
 
     /// Compute the PID output from the measured back EMF and current setpoint.
+    ///
+    /// `timestamp_ms` is the *scheduled* time of this control step, from a fixed-rate schedule
+    /// with the configured PID sample time: it must never decrease, and consecutive steps must be
+    /// at least one sample period apart.
+    ///
+    /// The PID controller is a fixed-rate discrete controller: it always assumes one sample period
+    /// between steps and only uses the timestamps to skip steps that come too soon. Passing the
+    /// time a step happened to run (rather than its scheduled time) would let jitter skip steps.
     pub fn compute(
         &mut self,
         measurement: f32,

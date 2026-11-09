@@ -106,6 +106,19 @@ impl GainRange {
 
 /// PID controller wrapper with gain scheduling and simple anti-windup.
 ///
+/// # Timestamps
+///
+/// This is a fixed-rate discrete controller. The gains are scaled by the configured
+/// [Config::sample_time], and every computed step assumes exactly one sample period has passed:
+/// the real interval between calls is never used in the calculation. Timestamps only gate
+/// computation: a [Self::compute] whose timestamp is less than one sample period after the
+/// previous step returns the previous output without computing.
+///
+/// Callers must therefore pass the *scheduled* time of each control step (eg: `n *
+/// sample_time` from a fixed-rate schedule), not the time at which the step happened to run.
+/// Timestamps must never decrease, and consecutive computes must be at least one sample period
+/// apart.
+///
 /// Gain Scheduling:
 /// Often it is favorable to have a higher proportional gain KP for slow speeds, achieving
 ///  better control results.
@@ -183,7 +196,9 @@ impl Controller {
     ///
     /// - `measurement`: latest measured back emf value, corrected for ADC offset.
     /// - `initial_output`: the output to continue from
-    /// - `timestamp_ms`: current time in milliseconds
+    /// - `timestamp_ms`: scheduled time of this control step, in milliseconds (see
+    ///   [Timestamps](Self#timestamps)). The first [Self::compute] after seeding must be at
+    ///   least one sample period later.
     pub fn seed(&mut self, measurement: f32, initial_output: f32, timestamp_ms: u64) {
         self.pid = PidController::new(
             self.inner_config,
@@ -210,10 +225,27 @@ impl Controller {
     ///
     /// - `measurement`: latest measured back emf value, corrected for ADC offset.
     /// - `setpoint`: desired target value (back emf value)
-    /// - `timestamp_ms`: current time in milliseconds
+    /// - `timestamp_ms`: scheduled time of this control step, in milliseconds (see
+    ///   [Timestamps](Self#timestamps)). Must be at least one sample period after the previous
+    ///   step.
     ///
     /// Call [Self::seed] first to seed the controller; otherwise it starts from zero output.
     pub fn compute(&mut self, measurement: f32, setpoint: f32, timestamp_ms: u64) -> u16 {
+        // An earlier timestamp would be skipped by the library (or, if it went backwards, panic or
+        // wrap in its time subtraction). Either means the caller isn't using a fixed-rate schedule.
+        debug_assert!(
+            self.pid.last_time().is_none_or(|last| {
+                // Same comparison as the library's gate, so this holds for any sample time.
+                // checked_sub catches a timestamp going backwards without panicking here.
+                timestamp_ms
+                    .checked_sub(last.0)
+                    .is_some_and(|dt| Duration::from_millis(dt) >= self.inner_config.sample_time())
+            }),
+            "PID step at {}ms is less than one sample period after the previous step at {:?}ms",
+            timestamp_ms,
+            self.pid.last_time().map(|t| t.0),
+        );
+
         let setpoint = setpoint.clamp(0.0, self.params.max_setpoint);
 
         // Anti-windup: hold integration that would push further into saturation, based on the
@@ -433,6 +465,63 @@ mod tests {
             f32::from(out) >= min_integral - 1.0,
             "integral wound down to {out} while saturated (limit {min_integral})"
         );
+    }
+
+    #[test]
+    fn test_steps_one_sample_period_apart_are_never_skipped() {
+        let mut pid = build_default_pid();
+        let cfg = pid.params;
+
+        // A constant error large enough that each step's integral increment shows in the
+        // (truncated) u16 output, without saturating.
+        let measurement = cfg.max_setpoint - 600.0;
+        let setpoint = cfg.max_setpoint;
+        assert!(integral_step(setpoint - measurement) >= 2.0);
+
+        pid.seed(measurement, 1000.0, 0);
+        let mut prev = pid.compute(measurement, setpoint, TS);
+        for i in 2..=50 {
+            let out = pid.compute(measurement, setpoint, i * TS);
+            assert!(out < cfg.output_max, "test saturated at step {i}");
+            // a skipped step would return the previous output unchanged
+            assert!(out > prev, "step {i} was skipped: output {out} == {prev}");
+            prev = out;
+        }
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "less than one sample period")]
+    fn test_step_less_than_one_sample_period_apart_panics_in_debug() {
+        let mut pid = build_default_pid();
+
+        pid.seed(100.0, 1000.0, 0);
+        pid.compute(100.0, 100.0, TS);
+        // A caller passing the time steps actually ran (with jitter) rather than their scheduled
+        // time could do this; the library would silently skip the step.
+        pid.compute(100.0, 100.0, 2 * TS - 1);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "less than one sample period")]
+    fn test_first_step_after_seed_must_be_one_sample_period_later() {
+        let mut pid = build_default_pid();
+
+        pid.seed(100.0, 1000.0, 10);
+        pid.compute(100.0, 100.0, 10);
+    }
+
+    #[test]
+    #[cfg(debug_assertions)]
+    #[should_panic(expected = "less than one sample period")]
+    fn test_step_going_backwards_panics_in_debug() {
+        let mut pid = build_default_pid();
+
+        pid.seed(100.0, 1000.0, 10 * TS);
+        pid.compute(100.0, 100.0, 11 * TS);
+        // caught by the assertion rather than underflowing in the library's time subtraction
+        pid.compute(100.0, 100.0, 5 * TS);
     }
     //endregion
 
