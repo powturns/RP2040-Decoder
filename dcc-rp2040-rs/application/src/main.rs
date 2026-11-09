@@ -8,7 +8,6 @@ mod functions;
 mod motor;
 mod store;
 mod timer;
-mod timers;
 mod transport;
 
 #[allow(unused_imports)]

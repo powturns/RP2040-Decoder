@@ -1,6 +1,5 @@
 use crate::MOTOR_CHANNEL;
 use crate::motor::{Command, MotorDriver, RpMotorDriver};
-use crate::timers::{INSTANT_MAX_FIXED, duration_to_timer_saturating};
 use ::motor::speed::Controller as SpeedController;
 use ::motor::speed::accel;
 use core::cmp::min;
@@ -101,7 +100,7 @@ async fn motor_driver_task(
         Ok(())
     }
 
-    let mut pid_sample_timer: Timer = Timer::at(INSTANT_MAX_FIXED);
+    let mut pid_sample_timer: Timer = Timer::at(Instant::MAX);
     let mut last_output_level = OutputLevel {
         dir: Direction::Forward,
         setpoint: 0,
@@ -141,7 +140,7 @@ async fn motor_driver_task(
         } else {
             // if the setpoint is zero, wait until we get a command changing the
             // setpoint before resuming PID sampling
-            *pid_sample_timer = Timer::at(INSTANT_MAX_FIXED);
+            *pid_sample_timer = Timer::at(Instant::MAX);
         }
     };
 
@@ -175,7 +174,7 @@ async fn motor_driver_task(
                         .await
                         .inspect_err(|e| error!("error acknowledging cv: {:?}", e));
 
-                    pid_sample_timer = Timer::at(INSTANT_MAX_FIXED);
+                    pid_sample_timer = Timer::at(Instant::MAX);
                 }
                 Command::Reset => {
                     let _ = motor_driver
@@ -184,7 +183,7 @@ async fn motor_driver_task(
 
                     speed_control.reset();
 
-                    pid_sample_timer = Timer::at(INSTANT_MAX_FIXED);
+                    pid_sample_timer = Timer::at(Instant::MAX);
                 }
                 Command::SetVelocity128(_) => {
                     // noop - handled by the speed channel
@@ -227,7 +226,7 @@ async fn accel_helper_task(mut accel_helper: accel::Helper, speed_table: SpeedTa
         }
     };
 
-    let mut accel_timer = Timer::at(INSTANT_MAX_FIXED);
+    let mut accel_timer = Timer::at(Instant::MAX);
 
     loop {
         match select(ACCEL_HELPER_CHANNEL.receive(), &mut accel_timer).await {
@@ -239,23 +238,26 @@ async fn accel_helper_task(mut accel_helper: accel::Helper, speed_table: SpeedTa
                     // reset the motor speed channel to stopped to ensure the previous_setpoint
                     // value is accurate
                     maybe_send_to_channel(VelocitySetpoint::default());
-                    accel_timer = Timer::at(INSTANT_MAX_FIXED);
+                    accel_timer = Timer::at(Instant::MAX);
                 }
                 Command::SetVelocity128(v) => {
                     accel_helper.set_target(v);
                     let (setpoint, delay) = accel_helper.step();
                     maybe_send_to_channel(setpoint);
-                    accel_timer =
-                        duration_to_timer_saturating(delay.try_into().unwrap_or(Duration::MAX))
+                    accel_timer = duration_to_timer(delay.try_into().unwrap_or(Duration::MAX))
                 }
             },
             Either::Second(_) => {
                 // accel_timer expired
                 let (setpoint, delay) = accel_helper.step();
                 maybe_send_to_channel(setpoint);
-                accel_timer =
-                    duration_to_timer_saturating(delay.try_into().unwrap_or(Duration::MAX))
+                accel_timer = duration_to_timer(delay.try_into().unwrap_or(Duration::MAX))
             }
         }
     }
+}
+
+/// Safely converts the duration to the timer.
+pub fn duration_to_timer(d: Duration) -> Timer {
+    Timer::at(Instant::now().saturating_add(d))
 }
