@@ -107,7 +107,7 @@ impl RpMotorDriver {
         }
     }
 
-    /// Measure the back emf of the motor.
+    /// Measure the back emf of the motor for the direction last set by [Self::set_output_level].
     async fn measure(&mut self) -> Result<f32, Error> {
         // FIXME: restore the levels after the measurement?
         self.fwd.stop()?;

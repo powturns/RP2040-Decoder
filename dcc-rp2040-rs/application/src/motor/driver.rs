@@ -111,24 +111,36 @@ async fn motor_driver_task(
                                 motor_driver: &mut RpMotorDriver,
                                 speed_control: &mut SpeedController,
                                 pid_sample_timer: &mut Timer| {
+        let dir_changed: bool;
+
         if let Some(new_output_level) = new_output_level {
+            dir_changed = motor_driver.dir != new_output_level.dir;
+
             last_output_level = new_output_level;
+        } else {
+            dir_changed = false;
         }
 
-        // only calculate the new output if the setpoint is non-zero,
-        // otherwise immediately stop the motor. This saves cycles if the
-        // engine is stopped.
-        if last_output_level.setpoint != 0 {
+        if last_output_level.setpoint != 0 && !dir_changed {
+            // normal running operation: set the output
             let _ = compute_and_set_output(motor_driver, speed_control, last_output_level)
                 .await
                 .inspect_err(|e| error!("error setting output: {:?}", e));
-
-            *pid_sample_timer = Timer::after(pid_sample_time);
         } else {
+            // the setpoint is zero, or we just changed direction. Reset the speed controller
+            // and stop the motor. Use set_output_level so the new direction is set.
             speed_control.reset();
             let _ = motor_driver
-                .stop()
+                .set_output_level(0, last_output_level.dir)
                 .inspect_err(|e| error!("error stopping motor: {:?}", e));
+        }
+
+        if last_output_level.setpoint != 0 {
+            // normal running operation
+            *pid_sample_timer = Timer::after(pid_sample_time);
+        } else {
+            // if the setpoint is zero, wait until we get a command changing the
+            // setpoint before resuming PID sampling
             *pid_sample_timer = Timer::at(INSTANT_MAX_FIXED);
         }
     };
