@@ -294,7 +294,8 @@ impl<T: Store> StoreExt for T {
     }
 
     fn motor_pwm_divider(&self) -> Result<u8, Error> {
-        self.read_byte(MotorPwmDivider as usize)
+        // ensure the pwm divider is at least 1 so there are no divide by zero errors
+        self.read_byte(MotorPwmDivider as usize).map(|e| e.max(1))
     }
 
     fn speed_step_period(&self) -> Result<Duration, Error> {
