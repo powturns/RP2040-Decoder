@@ -100,7 +100,7 @@ fn parse_add_sub_expr(s: &str) -> Option<u64> {
         }
     }
     flush(&mut cur, &mut acc, &mut sign)?;
-    if acc < 0 { None } else { Some(acc as u64) }
+    if acc < 0 { None } else { u64::try_from(acc).ok() }
 }
 
 fn parse_size_literal(s: &str) -> Option<u64> {

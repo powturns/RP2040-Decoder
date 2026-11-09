@@ -73,7 +73,8 @@ impl RpMotorDriver {
         let mut pwm_config = pwm::Config::default();
         pwm_config.compare_a = 0;
         pwm_config.compare_b = 0;
-        pwm_config.top = config.pwm_max_output; // FIXME: c code subtracts 1
+        // pwm_max_output is already the counter top (counts per period - 1)
+        pwm_config.top = config.pwm_max_output;
         pwm_config.divider = config.pwm_clk_divider;
 
         let pwm = Pwm::new_output_ab(

@@ -243,7 +243,9 @@ async fn main(spawner: Spawner) {
 
     let motor_pwm_frequency = unwrap!(cv_store.motor_pwm_frequency());
     debug!("motor_pwm_frequency={}", motor_pwm_frequency);
-    let output_max = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency) as u16;
+    let output_max = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency)
+        .saturating_sub(1) // subtract 1,  otherwise the PWM counts one too many per period
+        .min(u16::MAX.into()) as u16;
 
     let mut motor_driver = {
         let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
