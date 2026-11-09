@@ -1,4 +1,4 @@
-pub mod handler;
+pub mod driver;
 use crate::MotorResources;
 use embassy_rp::gpio::Pull;
 
@@ -50,7 +50,7 @@ pub struct Config {
     pub emf_r_cutoff: u8,
 }
 
-pub struct RpMotorController {
+pub struct RpMotorDriver {
     config: Config,
     dir: Direction,
     fwd: DirectionControl,
@@ -63,7 +63,7 @@ pub struct RpMotorController {
     emf_buf: [u16; MAX_EMF_SAMPLES],
 }
 
-impl RpMotorController {
+impl RpMotorDriver {
     pub fn new(
         config: Config,
         resources: MotorResources,
@@ -156,7 +156,7 @@ impl RpMotorController {
     }
 }
 
-impl Controller for RpMotorController {
+impl MotorDriver for RpMotorDriver {
     type Error = Error;
     /// Measures the back emf ADC values when the motor isn't running.
     async fn measure_adc_offset(&mut self) -> Result<u16, Error> {
@@ -226,7 +226,8 @@ impl Controller for RpMotorController {
     }
 }
 
-pub trait Controller {
+/// Hardware operations for a motor.
+pub trait MotorDriver {
     type Error;
 
     /// Measures the back emf ADC values when the motor isn't running.

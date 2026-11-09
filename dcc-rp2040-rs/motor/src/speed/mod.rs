@@ -81,10 +81,10 @@ impl Controller {
         measurement: f32,
         setpoint: u32,
         timestamp_ms: u64,
-    ) -> Result<Option<u16>, Error> {
+    ) -> Result<u16, Error> {
         if setpoint == 0 {
             self.reset();
-            return Ok(Some(0));
+            return Ok(0);
         }
 
         let measurement = (measurement - self.config.adc_offset).max(0.0); // TODO: should we actually clamp this to zero?
@@ -110,12 +110,12 @@ impl Controller {
                     if count % SAMPLE_RATE == 0 {
                         trace!("startup(measurement={}) -> output={}", measurement, out);
                     }
-                    Ok(Some(out))
+                    Ok(out)
                 }
-                ComputeResult::Handover(ff) => {
+                ComputeResult::Handover(ff, out) => {
                     trace!("Switching to PID mode with feedforward={}", ff);
                     self.mode = Pid(ff);
-                    Ok(None)
+                    Ok(out)
                 }
             },
             Pid(ff) => {
@@ -130,7 +130,7 @@ impl Controller {
                     );
                 }
 
-                Ok(Some(out))
+                Ok(out)
             }
         }
     }

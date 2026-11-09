@@ -86,12 +86,13 @@ impl Controller {
                 measurement, self.output
             );
             let ff = self.config.pid_ff * self.output as f32;
+            let curr_output = self.output;
 
             self.prev_start_output[self.buf_write_idx] = self.output;
             self.buf_write_idx = (self.buf_write_idx + 1) % self.prev_start_output.len();
             self.output = 0;
 
-            ComputeResult::Handover(ff)
+            ComputeResult::Handover(ff, curr_output)
         }
     }
 }
@@ -102,5 +103,5 @@ pub enum ComputeResult {
     Output(u16),
 
     /// Handover control to the PID controller, using the specified value as the feed forward value.
-    Handover(f32),
+    Handover(f32, u16),
 }

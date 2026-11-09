@@ -6,7 +6,7 @@ use crate::transport::packet::{
     AdvancedOperationsInstruction, Error as PacketError, OperationModeInstruction, Packet,
     ServiceInstructionType, ServicePacket,
 };
-use crate::{FunctionGroup, FunctionGroupFlags, Timer, is_broadcast, is_recipient};
+use crate::{FunctionGroup, Timer, is_broadcast, is_recipient};
 use motor::{SpeedStep, VelocitySetpoint};
 
 const SERVICE_MODE_TIMEOUT_MS: usize = 20;
@@ -137,7 +137,7 @@ where
         }
     }
 
-    fn handle_reset(&mut self, packet: &Packet) -> Result<Op, Error> {
+    fn handle_reset(&mut self, _packet: &Packet) -> Result<Op, Error> {
         Ok(Op::Reset)
     }
 

@@ -24,7 +24,7 @@ use panic_reset as _;
 use defmt_rtt as _;
 
 // use crate::transport::Decoder;
-use crate::motor::{Command, Controller as MotorController, RpMotorController};
+use crate::motor::{Command, MotorDriver, RpMotorDriver};
 use crate::timer::InstantTimer;
 use crate::transport::pio_decoder::PioDccDecoder;
 use ::dcc::transport::{Decoder, packet::Packet};
@@ -246,7 +246,7 @@ async fn main(spawner: Spawner) {
     debug!("motor_pwm_frequency={}", motor_pwm_frequency);
     let output_max = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency) as u16;
 
-    let mut motor_controller = {
+    let mut motor_driver = {
         let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
 
         let config = motor::Config {
@@ -260,7 +260,7 @@ async fn main(spawner: Spawner) {
 
         debug!("motor::Config={:?}", config);
 
-        RpMotorController::new(
+        RpMotorDriver::new(
             config,
             r.motor,
             adc,
@@ -274,7 +274,7 @@ async fn main(spawner: Spawner) {
             // calculate the offset, and store it in the store
             debug!("calculating adc offset");
 
-            match motor_controller.measure_adc_offset().await {
+            match motor_driver.measure_adc_offset().await {
                 Ok(measured_offset) => {
                     if measured_offset >= u8::MAX as u16 {
                         error!("adc offset is too large: {}, truncating", measured_offset);
@@ -366,12 +366,12 @@ async fn main(spawner: Spawner) {
 
     spawner.spawn(unwrap!(packet_decoder(/*watchdog,*/ decoder)));
     spawner.spawn(unwrap!(packet_handler(ph, fg_handler)));
-    motor::handler::spawn(
+    motor::driver::spawn(
         spawner,
         pid_sample_time
             .try_into()
             .unwrap_or(Duration::from_millis(7)),
-        motor_controller,
+        motor_driver,
         speed_control,
         accel_helper,
         speed_table,

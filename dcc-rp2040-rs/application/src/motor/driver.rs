@@ -1,5 +1,5 @@
 use crate::MOTOR_CHANNEL;
-use crate::motor::{Command, Controller as MotorController, RpMotorController};
+use crate::motor::{Command, MotorDriver, RpMotorDriver};
 use crate::timers::{INSTANT_MAX_FIXED, duration_to_timer_saturating};
 use ::motor::speed::Controller as SpeedController;
 use ::motor::speed::accel;
@@ -34,15 +34,15 @@ impl From<::motor::speed::Error> for Error {
 pub(crate) fn spawn(
     spawner: Spawner,
     pid_sample_time: Duration,
-    motor_controller: RpMotorController,
+    motor_driver: RpMotorDriver,
     speed_control: SpeedController,
     accel_helper: accel::Helper,
     speed_table: SpeedTable,
 ) {
     spawner.spawn(unwrap!(accel_helper_task(accel_helper, speed_table)));
-    spawner.spawn(unwrap!(motor_controller_task(
+    spawner.spawn(unwrap!(motor_driver_task(
         pid_sample_time,
-        motor_controller,
+        motor_driver,
         speed_control,
     )));
     spawner.spawn(unwrap!(dispatcher()));
@@ -55,11 +55,11 @@ async fn dispatcher() {
         let command = MOTOR_CHANNEL.receive().await;
         match command {
             Command::AcknowledgeCv => {
-                MOTOR_CONTROLLER_CHANNEL.send(command).await;
+                MOTOR_DRIVER_CHANNEL.send(command).await;
             }
             Command::Reset => {
                 ACCEL_HELPER_CHANNEL.send(command).await;
-                MOTOR_CONTROLLER_CHANNEL.send(command).await;
+                MOTOR_DRIVER_CHANNEL.send(command).await;
             }
             Command::SetVelocity128(_) => {
                 ACCEL_HELPER_CHANNEL.send(command).await;
@@ -75,31 +75,28 @@ struct OutputLevel {
     setpoint: u16,
 }
 
-static MOTOR_CONTROLLER_CHANNEL: Channel<ThreadModeRawMutex, Command, 5> = Channel::new();
+static MOTOR_DRIVER_CHANNEL: Channel<ThreadModeRawMutex, Command, 5> = Channel::new();
 static MOTOR_SPEED_CHANNEL: Signal<ThreadModeRawMutex, OutputLevel> = Signal::new();
 #[embassy_executor::task]
-async fn motor_controller_task(
+async fn motor_driver_task(
     pid_sample_time: Duration,
-    mut motor_controller: RpMotorController,
+    mut motor_driver: RpMotorDriver,
     mut speed_control: SpeedController,
 ) {
-    trace!("starting motor controller task");
+    trace!("starting motor driver task");
     async fn compute_and_set_output(
-        motor_controller: &mut RpMotorController,
+        motor_driver: &mut RpMotorDriver,
         speed_control: &mut SpeedController,
         level: OutputLevel,
     ) -> Result<(), Error> {
-        let bemf = motor_controller.measure().await?;
+        let bemf = motor_driver.measure().await?;
 
         let output =
             speed_control.compute(bemf, level.setpoint as u32, Instant::now().as_millis())?;
 
         // trace!("bemf={}, output={}", bemf, output);
 
-        // fixme: consider calling this only if the level changes
-        if let Some(output) = output {
-            motor_controller.set_output_level(output, level.dir)?
-        }
+        motor_driver.set_output_level(output, level.dir)?;
 
         Ok(())
     }
@@ -111,7 +108,7 @@ async fn motor_controller_task(
     };
 
     let mut set_output = async |new_output_level: Option<OutputLevel>,
-                                motor_controller: &mut RpMotorController,
+                                motor_driver: &mut RpMotorDriver,
                                 speed_control: &mut SpeedController,
                                 pid_sample_timer: &mut Timer| {
         if let Some(new_output_level) = new_output_level {
@@ -122,14 +119,14 @@ async fn motor_controller_task(
         // otherwise immediately stop the motor. This saves cycles if the
         // engine is stopped.
         if last_output_level.setpoint != 0 {
-            let _ = compute_and_set_output(motor_controller, speed_control, last_output_level)
+            let _ = compute_and_set_output(motor_driver, speed_control, last_output_level)
                 .await
                 .inspect_err(|e| error!("error setting output: {:?}", e));
 
             *pid_sample_timer = Timer::after(pid_sample_time);
         } else {
             speed_control.reset();
-            let _ = motor_controller
+            let _ = motor_driver
                 .stop()
                 .inspect_err(|e| error!("error stopping motor: {:?}", e));
             *pid_sample_timer = Timer::at(INSTANT_MAX_FIXED);
@@ -139,7 +136,7 @@ async fn motor_controller_task(
     loop {
         match select3(
             MOTOR_SPEED_CHANNEL.wait(),
-            MOTOR_CONTROLLER_CHANNEL.receive(),
+            MOTOR_DRIVER_CHANNEL.receive(),
             &mut pid_sample_timer,
         )
         .await
@@ -152,7 +149,7 @@ async fn motor_controller_task(
                 // output level changed
                 set_output(
                     Some(level),
-                    &mut motor_controller,
+                    &mut motor_driver,
                     &mut speed_control,
                     &mut pid_sample_timer,
                 )
@@ -161,7 +158,7 @@ async fn motor_controller_task(
             Either3::Second(c) => match c {
                 // command received via a packet
                 Command::AcknowledgeCv => {
-                    let _ = motor_controller
+                    let _ = motor_driver
                         .acknowledge_cv()
                         .await
                         .inspect_err(|e| error!("error acknowledging cv: {:?}", e));
@@ -169,7 +166,7 @@ async fn motor_controller_task(
                     pid_sample_timer = Timer::at(INSTANT_MAX_FIXED);
                 }
                 Command::Reset => {
-                    let _ = motor_controller
+                    let _ = motor_driver
                         .stop()
                         .inspect_err(|e| error!("error stopping motor: {:?}", e));
 
@@ -185,7 +182,7 @@ async fn motor_controller_task(
                 // pid timer timeout
                 set_output(
                     None,
-                    &mut motor_controller,
+                    &mut motor_driver,
                     &mut speed_control,
                     &mut pid_sample_timer,
                 )
