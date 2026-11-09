@@ -21,6 +21,7 @@ impl Timer for InstantTimer {
     }
 
     fn elapsed_ms(&self) -> Option<usize> {
-        self.mark.map(|m| usize::try_from(m.elapsed().as_millis()).unwrap_or(usize::MAX))
+        self.mark
+            .map(|m| usize::try_from(m.elapsed().as_millis()).unwrap_or(usize::MAX))
     }
 }

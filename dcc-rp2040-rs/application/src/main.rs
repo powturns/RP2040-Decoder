@@ -220,7 +220,7 @@ async fn main(spawner: Spawner) {
     let mut cv_store =
         unwrap!(store::Flash::new(flash, CV_FLASH_ORIGIN as u32 - FLASH_BASE as u32).await);
 
-    // let MAX_MEASUREMENT = 550;
+    // let MAX_MEASUREMENT = 450;
     // let vhigh = (MAX_MEASUREMENT/16) as u8;
     // let vmid = (vhigh as f32 * 0.6) as u8;
     // info!("vhigh={}, vmid={}", vhigh, vmid);

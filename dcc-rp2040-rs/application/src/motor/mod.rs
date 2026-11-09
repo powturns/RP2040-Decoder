@@ -52,6 +52,7 @@ pub struct Config {
 
 pub struct RpMotorDriver {
     config: Config,
+    pwm_level: u16,
     dir: Direction,
     fwd: DirectionControl,
     rev: DirectionControl,
@@ -98,6 +99,7 @@ impl RpMotorDriver {
 
         Self {
             config,
+            pwm_level: 0,
             dir: Direction::Forward,
             fwd,
             rev,
@@ -110,7 +112,6 @@ impl RpMotorDriver {
 
     /// Measure the back emf of the motor for the direction last set by [Self::set_output_level].
     async fn measure(&mut self) -> Result<f32, Error> {
-        // FIXME: restore the levels after the measurement?
         self.fwd.stop()?;
         self.rev.stop()?;
 
@@ -125,23 +126,32 @@ impl RpMotorDriver {
             if l + r < n { (l, r) } else { (0, 0) }
         };
 
-        let buf = &mut self.emf_buf[..n];
-
         Timer::after(self.config.emf_measurement_delay).await;
 
-        match self.dir {
+        let buf = &mut self.emf_buf[..n];
+        let measured = match self.dir {
             Direction::Forward => {
                 self.fwd
                     .measure_emf(&mut self.adc, buf, &mut self.dma)
-                    .await?
+                    .await
             }
             Direction::Reverse => {
                 self.rev
                     .measure_emf(&mut self.adc, buf, &mut self.dma)
-                    .await?
+                    .await
             }
-        }
+        };
 
+        // re-energize the motor immediately after the dma completes
+        // to minimize the time the motor is coasting
+        self.apply_pwm_level()?;
+
+        // raise any errors that occurred during measurement after restoring the power
+        measured?;
+
+        // reborrow the buf that was populated during measurement. We can't hold it
+        // across apply_pwm_level because of multiple mutable borrows
+        let buf = &mut self.emf_buf[..n];
         buf.sort_unstable();
 
         let filtered_cnt = n - (l_cutoff + r_cutoff);
@@ -154,6 +164,22 @@ impl RpMotorDriver {
             .sum();
 
         Ok(sum as f32 / filtered_cnt as f32)
+    }
+
+    /// Energizes the motor with the current direction and pwm level.
+    fn apply_pwm_level(&mut self) -> Result<(), Error> {
+        match self.dir {
+            Direction::Forward => {
+                self.rev.stop()?;
+                self.fwd.set_output(self.pwm_level)?;
+            }
+            Direction::Reverse => {
+                self.fwd.stop()?;
+                self.rev.set_output(self.pwm_level)?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -204,26 +230,17 @@ impl MotorDriver for RpMotorDriver {
         Ok(())
     }
     fn stop(&mut self) -> Result<(), Error> {
+        self.pwm_level = 0;
         self.fwd.stop()?;
         self.rev.stop()?;
         Ok(())
     }
 
     fn set_output_level(&mut self, pwm_level: u16, direction: Direction) -> Result<(), Error> {
+        self.pwm_level = pwm_level;
         self.dir = direction;
 
-        match direction {
-            Direction::Forward => {
-                self.rev.stop()?;
-                self.fwd.set_output(pwm_level)?;
-            }
-            Direction::Reverse => {
-                self.fwd.stop()?;
-                self.rev.set_output(pwm_level)?;
-            }
-        }
-
-        Ok(())
+        self.apply_pwm_level()
     }
 }
 
