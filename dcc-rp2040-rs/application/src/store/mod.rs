@@ -98,9 +98,11 @@ impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, FLASH_SIZE> {
 
 impl<'d, T: Instance, const FLASH_SIZE: usize> Store for Flash<'d, T, FLASH_SIZE> {
     fn read_byte(&self, address: usize) -> Result<u8, Error> {
-        self.cache
-            .get(address - 1)
-            .map(|&byte| byte)
+        // CVs are 1-indexed; address 0 is invalid
+        address
+            .checked_sub(1)
+            .and_then(|idx| self.cache.get(idx))
+            .copied()
             .ok_or(Error::InvalidAddress)
     }
 

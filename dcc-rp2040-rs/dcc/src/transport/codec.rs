@@ -68,15 +68,16 @@ fn is_advanced_extended(raw: &[u8]) -> bool {
 /// Frames of up to 6 bytes carry only the XOR checksum. Longer frames carry a CRC-8 just before
 /// the XOR checksum; frames of exactly 7 bytes are forbidden and must be ignored.
 fn check_advanced_extended(raw: &[u8]) -> Result<(), PacketError> {
-    match raw.len() {
-        7 => return Err(PacketError::InvalidChecksum),
-        len if len > MAX_EXTENDED_LEN => {
-            // CRC over everything except the XOR byte, including the CRC itself, yields 0
-            if !check_crc8(&raw[..len - 1]) {
-                return Err(PacketError::InvalidChecksum);
-            }
-        }
-        _ => {}
+    let len = raw.len();
+
+    // frames of exactly 7 bytes are forbidden
+    if len == 7 {
+        return Err(PacketError::InvalidChecksum);
+    }
+
+    // CRC over everything except the XOR byte, including the CRC itself
+    if len > MAX_EXTENDED_LEN && !check_crc8(&raw[..len - 1]) {
+        return Err(PacketError::InvalidChecksum);
     }
 
     // XOR covers every byte, including the CRC-8 when present

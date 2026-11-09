@@ -64,9 +64,11 @@ pub fn build(config: Config) -> SpeedTable {
         );
 
     // Second segment (indices 64..=126): linear from v_mid (index 63) to v_max (index 126)
-    table.iter_mut().enumerate().skip(MIDPOINT + 1).for_each(
-        |(i, v)| *v = calc_step(v_mid, v_max, MIDPOINT, i - MIDPOINT),
-    );
+    table
+        .iter_mut()
+        .enumerate()
+        .skip(MIDPOINT + 1)
+        .for_each(|(i, v)| *v = calc_step(v_mid, v_max, MIDPOINT, i - MIDPOINT));
 
     table
 }
@@ -156,7 +158,8 @@ mod tests {
 
     #[test]
     fn table_is_monotonic() {
-        for (v_start, v_mid, v_high) in [(1, 64, 126), (10, 50, 200), (0, 0, 255), (255, 255, 255)] {
+        for (v_start, v_mid, v_high) in [(1, 64, 126), (10, 50, 200), (0, 0, 255), (255, 255, 255)]
+        {
             let table = build(Config {
                 v_start,
                 v_mid,

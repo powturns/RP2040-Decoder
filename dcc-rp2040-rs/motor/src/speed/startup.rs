@@ -49,11 +49,8 @@ impl Controller {
                 (sum + v as usize, cnt + 1)
             });
 
-        if cnt != 0 {
-            ((sum / cnt) * 2 / 3) as u16
-        } else {
-            0
-        }
+        // 0 if there are no previous start outputs
+        sum.checked_div(cnt).map_or(0, |avg| (avg * 2 / 3) as u16)
     }
 
     /// Reset the controller.
