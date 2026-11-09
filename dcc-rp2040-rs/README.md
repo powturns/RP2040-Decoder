@@ -9,8 +9,21 @@ cd bootloader
 cargo flash --release --no-default-features
 ```
 
+## Development
+Build and run with probe-rs (from `application`):
+```sh
+cargo run --release
+```
 
-## Debugging
+SWD commonly becomes disconnected due to noise. To prevent firmware hangs, `defmt-rtt ` uses the `disable-blocking-mode`
+feature.
+To reconnect, run (from `application`):
+```sh
+probe-rs attach --chip RP2040 --protocol swd ../target/thumbv6m-none-eabi/release/DCC-RP2040-rs
+```
+
+
+### Debugging
 
 PIN Layout, from the "Rev. 0.3" (outside / rightmost) end:
 
