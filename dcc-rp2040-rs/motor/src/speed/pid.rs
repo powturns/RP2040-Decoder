@@ -4,14 +4,15 @@
 //! a configurable wrapper that:
 //! - mirrors the timing and derivative-on-measurement behavior,
 //! - supports gain scheduling for Kp (piecewise linear over the setpoint),
-//! - passes an optional feedforward term into the controller,
+//! - seeds the integral with an initial output (bumpless transfer), so the integral can wind
+//!   it back down if it was too large,
 //! - applies output limits, and
 //! - provides a simple anti-windup policy by holding integration while saturated.
 
 use core::ops::Range;
 use core::time::Duration;
 
-use discrete_pid::pid::{PidConfig, PidConfigError, PidController};
+use discrete_pid::pid::{PidConfig, PidConfigError, PidController, PidModifiers};
 use discrete_pid::time::Millis;
 
 #[derive(Eq, PartialEq)]
@@ -110,6 +111,10 @@ impl GainRange {
 ///  better control results.
 pub struct Controller {
     pid: PidController<Millis, f32>,
+    /// The `discrete_pid` library configuration, kept to rebuild [Self::pid] on
+    /// [Self::seed] / [Self::reset].
+    inner_config: PidConfig<f32>,
+    /// This wrapper's configuration (gain scheduling, setpoint range).
     params: Config,
     // Precomputed gain scheduling parameters
     gain_range_low: GainRange,
@@ -120,17 +125,17 @@ impl Controller {
     /// Creates a new SpeedPid initialized with the provided configuration.
     pub fn new(cfg: Config) -> Result<Self, Error> {
         // Build the underlying library configuration
-        let mut lib_cfg: PidConfig<f32> = PidConfig::default();
-        lib_cfg.set_kp(1.0)?; // placeholder; will be updated dynamically per setpoint
-        lib_cfg.set_ki(cfg.ki)?;
-        lib_cfg.set_kd(cfg.kd)?;
-        lib_cfg.set_filter_tc(cfg.filter_tc.as_secs_f32())?;
-        lib_cfg.set_sample_time(cfg.sample_time)?;
-        lib_cfg.set_output_limits(0.0, cfg.output_max as f32)?;
-        lib_cfg.set_use_derivative_on_measurement(true);
-        lib_cfg.set_use_strict_causal_integrator(true);
+        let mut inner_config: PidConfig<f32> = PidConfig::default();
+        inner_config.set_kp(1.0)?; // Placeholder: Kp is scheduled per call via `PidModifiers::p_scale`
+        inner_config.set_ki(cfg.ki)?;
+        inner_config.set_kd(cfg.kd)?;
+        inner_config.set_filter_tc(cfg.filter_tc.as_secs_f32())?;
+        inner_config.set_sample_time(cfg.sample_time)?;
+        inner_config.set_output_limits(0.0, cfg.output_max as f32)?;
+        inner_config.set_use_derivative_on_measurement(true);
+        inner_config.set_use_strict_causal_integrator(true);
 
-        let pid = PidController::new_uninit(lib_cfg);
+        let pid = PidController::new_uninit(inner_config);
 
         // Gain scheduling precompute
         let kp_x1 = cfg.max_setpoint * cfg.kp_gain_range1_end;
@@ -155,6 +160,7 @@ impl Controller {
 
         Ok(Self {
             pid,
+            inner_config,
             params: cfg,
             gain_range_low: gain_range1,
             gain_range_high: gain_range2,
@@ -163,9 +169,28 @@ impl Controller {
 
     /// Reset the controller.
     ///
-    /// Useful on direction changes or when stopping.
+    /// Useful on direction changes or when stopping. Clears all of the controller state
+    /// so the next run doesn't start with a derivative kick from stale state.
     pub fn reset(&mut self) {
-        self.pid.reset_integral();
+        self.pid = PidController::new_uninit(self.inner_config);
+    }
+
+    /// Seeds the controller with a bumpless transfer from the startup controller.
+    ///
+    /// The integral is seeded with `initial_output`, and the derivative state with `measurement`,
+    /// so the first output continues from `initial_output`. Unlike a fixed feedforward term, the
+    /// integral can then wind down if `initial_output` is too large.
+    ///
+    /// - `measurement`: latest measured back emf value, corrected for ADC offset.
+    /// - `initial_output`: the output to continue from
+    /// - `timestamp_ms`: current time in milliseconds
+    pub fn seed(&mut self, measurement: f32, initial_output: f32, timestamp_ms: u64) {
+        self.pid = PidController::new(
+            self.inner_config,
+            Millis(timestamp_ms),
+            measurement,
+            initial_output,
+        );
     }
 
     /// Computes the scheduled Kp based on the provided setpoint.
@@ -186,30 +211,27 @@ impl Controller {
     /// - `measurement`: latest measured back emf value, corrected for ADC offset.
     /// - `setpoint`: desired target value (back emf value)
     /// - `timestamp_ms`: current time in milliseconds
-    /// - `feedforward`: feedforward term
-    pub fn compute(
-        &mut self,
-        measurement: f32,
-        setpoint: f32,
-        timestamp_ms: u64,
-        feedforward: f32,
-    ) -> Result<u16, Error> {
+    ///
+    /// Call [Self::seed] first to seed the controller; otherwise it starts from zero output.
+    pub fn compute(&mut self, measurement: f32, setpoint: f32, timestamp_ms: u64) -> u16 {
         let setpoint = setpoint.clamp(0.0, self.params.max_setpoint);
-        // Dynamic Kp scheduling based on setpoint
-        let kp = self.kp_for_setpoint(setpoint);
-        // `config_mut` is deprecated because filter_tc/sample_time changes made through it don't
-        // re-derive the D-term filter. Only Kp changes here, so it's safe, and it avoids the cost
-        // of recomputing the filter coefficients that `set_config` would incur on every tick.
-        #[allow(deprecated)]
-        self.pid.config_mut().set_kp(kp)?;
 
-        // Compute control output
-        Ok(self.pid.compute(
-            measurement,
-            setpoint,
-            Millis(timestamp_ms),
-            Some(feedforward),
-        ) as u16)
+        // Anti-windup: hold integration that would push further into saturation, based on the
+        // previous output.
+        let prev_output = self.pid.output();
+        let mods = PidModifiers {
+            // Dynamic Kp scheduling based on setpoint (the base kp is 1)
+            p_scale: self.kp_for_setpoint(setpoint),
+            allow_integral_increase: prev_output < self.inner_config.output_max(),
+            allow_integral_decrease: prev_output > self.inner_config.output_min(),
+            ..PidModifiers::default()
+        };
+
+        // Compute control output. The output is clamped to [0, output_max], so the cast is lossless
+        // apart from truncating the fraction.
+        self.pid
+            .compute_with_modifiers(measurement, setpoint, Millis(timestamp_ms), None, &mods)
+            as u16
     }
 }
 
@@ -267,14 +289,150 @@ mod tests {
         let mut pid = build_default_pid();
         let cfg = pid.params;
 
-        // Use a large feedforward to force saturation and verify clamping.
+        // Use a large initial output to force saturation and verify clamping.
         let measurement = 0.0;
         let setpoint = cfg.max_setpoint * 10.0; // will be clamped internally to max_setpoint
-        let ff = cfg.output_max as f32; // large feedforward to reach upper limit
-        let out = pid.compute(measurement, setpoint, 0, ff).unwrap();
+        pid.seed(measurement, cfg.output_max as f32 * 2.0, 0);
+        let out = pid.compute(measurement, setpoint, 5);
 
-        assert!(out >= 0, "output should be >= 0");
         assert!(out <= cfg.output_max, "output should be <= output_max");
+    }
+    //endregion
+
+    //region seed / anti-windup
+
+    /// Sample time of [default_cv_config], in ms.
+    const TS: u64 = 5;
+
+    /// Integral increment for one step at `error`, with the default CV config.
+    fn integral_step(error: f32) -> f32 {
+        let cfg = default_cv_config();
+        cfg.ki * cfg.sample_time.as_secs_f32() * error
+    }
+
+    #[test]
+    fn test_seed_is_bumpless() {
+        let mut pid = build_default_pid();
+
+        // With zero error, the first output continues from the seeded value (no P, I or D kick).
+        pid.seed(100.0, 3000.0, 0);
+        let out = pid.compute(100.0, 100.0, TS);
+
+        assert_eq!(out, 3000);
+    }
+
+    #[test]
+    fn test_seed_replaces_previous_state() {
+        let mut pid = build_default_pid();
+
+        // Run fast for a while.
+        pid.seed(400.0, 4000.0, 0);
+        for i in 1..=100 {
+            pid.compute(400.0, 400.0, i * TS);
+        }
+
+        // Seed again at a low speed: no derivative kick from the previous 400 measurement, and
+        // no leftover integral.
+        let t = 1000;
+        pid.seed(10.0, 1000.0, t);
+        let out = pid.compute(10.0, 10.0, t + TS);
+
+        assert_eq!(out, 1000);
+    }
+
+    #[test]
+    fn test_reset_clears_derivative_and_integral_state() {
+        let mut pid = build_default_pid();
+
+        // Run fast for a while.
+        pid.seed(400.0, 4000.0, 0);
+        for i in 1..=100 {
+            pid.compute(400.0, 400.0, i * TS);
+        }
+        pid.reset();
+
+        // After a reset (without seeding), the controller starts from zero: no integral left over
+        // and no derivative kick from the previous 400 measurement. Only clearing the integral
+        // would leave the old measurement in the derivative term and give a non-zero output here.
+        let out = pid.compute(10.0, 10.0, 1000);
+
+        assert_eq!(out, 0);
+    }
+
+    #[test]
+    fn test_integral_winds_down_an_oversized_initial_output() {
+        let mut pid = build_default_pid();
+
+        // Startup handed over with an initial output that is far too large for the setpoint: the
+        // motor runs faster than the target.
+        let setpoint = 12.0;
+        let measurement = 40.0;
+        let steps = 2000;
+        pid.seed(measurement, 4000.0, 0);
+
+        let first = pid.compute(measurement, setpoint, TS);
+        let mut out = first;
+        for i in 2..=steps {
+            out = pid.compute(measurement, setpoint, i * TS);
+        }
+
+        // The integral must be able to go below the initial output (a fixed feedforward term
+        // with the integral clamped at 0 would never drop below `first`), and at the rate set by
+        // ki: P and D are constant, so the output falls by one integral step per sample.
+        let expected = -integral_step(setpoint - measurement) * (steps - 1) as f32;
+        let unwound = f32::from(first) - f32::from(out);
+        assert!(
+            (unwound - expected).abs() <= 2.0,
+            "output unwound by {unwound}, expected {expected}"
+        );
+    }
+
+    #[test]
+    fn test_no_windup_while_saturated_high() {
+        let mut pid = build_default_pid();
+        let cfg = pid.params;
+        let seeded_output = 3000.0;
+
+        // Large positive error saturates the output at max.
+        pid.seed(0.0, seeded_output, 0);
+        for i in 1..=500 {
+            let out = pid.compute(0.0, cfg.max_setpoint, i * TS);
+            assert_eq!(out, cfg.output_max);
+        }
+
+        // Error goes to zero with the same measurement (so no derivative term): the output is just
+        // the integral. Only the first step, before saturation was detected, may have integrated;
+        // without anti-windup the integral would have wound up to output_max.
+        let out = pid.compute(0.0, 0.0, 501 * TS);
+        let max_integral = seeded_output + integral_step(cfg.max_setpoint);
+        assert!(
+            f32::from(out) <= max_integral,
+            "integral wound up to {out} while saturated (limit {max_integral})"
+        );
+    }
+
+    #[test]
+    fn test_no_windup_while_saturated_low() {
+        let mut pid = build_default_pid();
+        let cfg = pid.params;
+        let seeded_output = 1000.0;
+
+        // Large negative error (the motor is much faster than the target) saturates the output at 0.
+        pid.seed(cfg.max_setpoint, seeded_output, 0);
+        for i in 1..=500 {
+            let out = pid.compute(cfg.max_setpoint, 0.0, i * TS);
+            assert_eq!(out, 0);
+        }
+
+        // Error goes to zero with the same measurement: the output is just the integral. Only the
+        // first step may have integrated; without anti-windup the integral would have wound down
+        // to 0.
+        let out = pid.compute(cfg.max_setpoint, cfg.max_setpoint, 501 * TS);
+        let min_integral = seeded_output + integral_step(-cfg.max_setpoint);
+        assert!(
+            f32::from(out) >= min_integral - 1.0,
+            "integral wound down to {out} while saturated (limit {min_integral})"
+        );
     }
     //endregion
 

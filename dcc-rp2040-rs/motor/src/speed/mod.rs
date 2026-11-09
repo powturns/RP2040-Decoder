@@ -36,8 +36,8 @@ impl Config {
 enum Mode {
     Startup,
 
-    /// PID controller is active, with the specified feedforward value.
-    Pid(f32),
+    /// PID controller is active. Its integral was seeded with the initial output at handover.
+    Pid,
 }
 
 /// A unified speed controller that uses the startup controller before the motor is moving
@@ -112,16 +112,19 @@ impl Controller {
                     }
                     Ok(out)
                 }
-                ComputeResult::Handover(ff, out) => {
-                    trace!("Switching to PID mode with feedforward={}", ff);
-                    self.mode = Pid(ff);
-                    Ok(out)
+                ComputeResult::Handover {
+                    initial_output,
+                    output,
+                } => {
+                    trace!("Switching to PID mode, initial output={}", initial_output);
+                    // bumpless transfer: the PID continues from the initial output
+                    self.pid.seed(measurement, initial_output, timestamp_ms);
+                    self.mode = Pid;
+                    Ok(output)
                 }
             },
-            Pid(ff) => {
-                let out = self
-                    .pid
-                    .compute(measurement, setpoint as f32, timestamp_ms, ff)?;
+            Pid => {
+                let out = self.pid.compute(measurement, setpoint as f32, timestamp_ms);
 
                 if count % SAMPLE_RATE == 0 {
                     trace!(
@@ -146,5 +149,78 @@ pub enum Error {
 impl From<pid::Error> for Error {
     fn from(e: pid::Error) -> Self {
         Error::PidError(e)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use core::time::Duration;
+
+    const OUTPUT_MAX: u16 = 4999;
+    const TS: u64 = 5;
+
+    fn controller() -> Controller {
+        let pid = pid::Config {
+            sample_time: Duration::from_millis(TS),
+            filter_tc: Duration::from_millis(10),
+            ki: 2.5,
+            kd: 0.005,
+            output_max: OUTPUT_MAX,
+            kp_gain_range1_end: 13.0 / 255.0,
+            kp_y0: 20.0,
+            kp_y1: 2.5,
+            kp_y2: 1.5,
+            max_setpoint: 400.0,
+        };
+        let startup = startup::Config {
+            output_max: OUTPUT_MAX,
+            pid_ff: 0.9,
+        };
+        Controller::new(Config::new(pid, startup, 0.0)).unwrap()
+    }
+
+    #[test]
+    fn handover_continues_from_startup_output() {
+        let mut c = controller();
+        // the measurement the motor reaches at handover; use it as the setpoint so the PID
+        // error is zero after handover
+        let moving_bemf = 10.0;
+        let setpoint = moving_bemf as u32;
+
+        // Ramp in startup mode until the motor moves.
+        let mut t = 0;
+        let mut last_startup = 0;
+        for _ in 0..10 {
+            t += TS;
+            last_startup = c.compute(0.0, setpoint, t).unwrap();
+        }
+        assert!(last_startup > 0);
+
+        // The motor starts moving: handover. The startup output is held for this step.
+        t += TS;
+        let handover_output = c.compute(moving_bemf, setpoint, t).unwrap();
+        assert!(matches!(c.mode, Pid));
+        assert!(handover_output > 0);
+
+        // With zero error and an unchanged measurement, the PID output is the initial output
+        // (CV47 fraction of the handover output), with no kick from P, I or D.
+        t += TS;
+        let expected = (0.9 * handover_output as f32) as u16;
+        let out = c.compute(moving_bemf, setpoint, t).unwrap();
+        assert!(
+            out.abs_diff(expected) <= 1,
+            "pid output {out} should continue from the initial output {expected}"
+        );
+    }
+
+    #[test]
+    fn reset_returns_to_startup() {
+        let mut c = controller();
+        c.compute(CONTROLLER_HANDOVER + 1.0, 100, TS).unwrap();
+        assert!(matches!(c.mode, Pid));
+
+        c.reset();
+        assert!(matches!(c.mode, Startup));
     }
 }

@@ -82,14 +82,19 @@ impl Controller {
                 "reached PID handover level: measurement={} output={}",
                 measurement, self.output
             );
-            let ff = self.config.pid_ff * self.output as f32;
+            // the PID controller continues from a fraction (CV47) of the output that got the
+            // motor moving
+            let initial_output = self.config.pid_ff * self.output as f32;
             let curr_output = self.output;
 
             self.prev_start_output[self.buf_write_idx] = self.output;
             self.buf_write_idx = (self.buf_write_idx + 1) % self.prev_start_output.len();
             self.output = 0;
 
-            ComputeResult::Handover(ff, curr_output)
+            ComputeResult::Handover {
+                initial_output,
+                output: curr_output,
+            }
         }
     }
 }
@@ -99,6 +104,11 @@ pub enum ComputeResult {
     /// Set the output to the given value.
     Output(u16),
 
-    /// Handover control to the PID controller, using the specified value as the feed forward value.
-    Handover(f32, u16),
+    /// Handover control to the PID controller.
+    Handover {
+        /// The output the PID controller continues from (its initial integral).
+        initial_output: f32,
+        /// Set the output to this value for this iteration.
+        output: u16,
+    },
 }
