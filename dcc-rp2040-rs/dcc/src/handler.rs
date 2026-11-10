@@ -2,10 +2,7 @@ use crate::cv::Cv;
 use crate::cv::store::Store;
 use crate::cv::store::{Error as StoreError, StoreExt, reset};
 use crate::handler::Op::{AcknowledgeCv, Reboot};
-use crate::transport::packet::{
-    AdvancedOperationsInstruction, Error as PacketError, OperationModeInstruction, Packet,
-    ServiceInstructionType, ServicePacket,
-};
+use crate::transport::packet::{AdvancedOperationsInstruction, CvAccess, Error as PacketError, ManipulateBit, OperationModeInstruction, Packet, ServiceInstructionType, ServicePacket};
 use crate::{FunctionGroup, Timer, is_broadcast, is_recipient};
 use motor::{SpeedStep, VelocitySetpoint};
 
@@ -39,7 +36,15 @@ where
 {
     enter_service_mode_timer: T,
     store: S,
+
+    /// The first of two identical service mode write packets.
     pending_service_packet: Option<Packet>,
+
+    /// The first of two identical Programming on the Main (POM) write packets
+    /// (S-9.2.1 §2.3.7.3).
+    ///
+    /// Cleared by any other packet addressed to this decoder, including broadcasts.
+    pending_pom_packet: Option<Packet>,
 }
 
 impl<T, S> Handler<T, S>
@@ -52,6 +57,7 @@ where
             enter_service_mode_timer: timer,
             store,
             pending_service_packet: None,
+            pending_pom_packet: None,
         }
     }
 
@@ -62,6 +68,9 @@ where
         let pending_service_packet = self.pending_service_packet.take();
 
         if packet.is_reset() {
+            // clear any pending main track programming packet
+            self.pending_pom_packet = None;
+
             // we may be entering service mode
             self.enter_service_mode_timer.start();
             self.handle_reset(packet).map(Some)
@@ -69,6 +78,9 @@ where
             && elapsed < SERVICE_MODE_TIMEOUT_MS
             && packet.service_mode_candidate()
         {
+            // clear any pending main track programming packet
+            self.pending_pom_packet = None;
+
             self.enter_service_mode_timer.start();
 
             self.handle_service_mode(packet, pending_service_packet)
@@ -82,7 +94,7 @@ where
 
             self.decode_operation_command(packet)
         } else {
-            // packet not addressed to us
+            // packet not addressed to us. A pending POM write survives it.
             self.enter_service_mode_timer.stop();
             Ok(None)
         }
@@ -90,7 +102,19 @@ where
 
     /// decodes the operation command.
     fn decode_operation_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        // Any packet addressed to us (including broadcasts) invalidates a pending POM write.
+        // The matching second packet of a write consumes it below.
+        let pending_pom_write = self.pending_pom_packet.take();
+
         match OperationModeInstruction::try_from(packet)? {
+            OperationModeInstruction::CvAccess(access) => {
+                if !is_broadcast(packet) {
+                    self.handle_pom(packet, access, pending_pom_write)
+                } else {
+                    // CV access is only accepted when it is addressed to this decoder.
+                    Ok(None)
+                }
+            }
             OperationModeInstruction::AdvancedOperations(o) => match o {
                 AdvancedOperationsInstruction::SpeedStepControl(v) => Ok(Some(Op::Velocity128(v))),
             },
@@ -106,6 +130,38 @@ where
                 }
             }
         }
+    }
+
+    /// Handles a Programming on the Main (POM) configuration variable access instruction.
+    ///
+    /// Writes are only executed when the packet is identical to `pending`, the previous
+    /// write packet (S-9.2.1 §2.3.7.3).
+    fn handle_pom(
+        &mut self,
+        packet: &Packet,
+        access: CvAccess,
+        pending: Option<Packet>,
+    ) -> Result<Option<Op>, Error> {
+        if !access.is_write() {
+            // A verify is only answered over RailCom, which this decoder doesn't support.
+            return Ok(None);
+        }
+
+        if pending.as_ref() != Some(packet) {
+            // first of two identical packets: hold it until the second arrives
+            self.pending_pom_packet = Some(packet.clone());
+            return Ok(None);
+        }
+
+        let op = match access {
+            CvAccess::WriteByte { cv, value } => self.write_cv(cv, value)?,
+            CvAccess::ManipulateBit(mb) => self.manipulate_cv_bit(mb)?,
+            CvAccess::VerifyByte { .. } => None,
+        };
+
+        // AcknowledgeCv is the service mode acknowledgement: a motor current pulse. On the main
+        // it would jolt a running loco, so only a reboot is passed on.
+        Ok(op.filter(|op| *op == Reboot))
     }
 
     fn handle_service_mode(
@@ -155,18 +211,22 @@ where
     }
 
     fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        let address = packet.cv_address()?;
+        self.write_cv(packet.cv_address()?, packet.cv_data()?)
+    }
 
+    /// Writes `value` to `cv`, applying the per-CV validation and side effects.
+    ///
+    /// Shared by service mode and operations mode.
+    fn write_cv(&mut self, cv: u16, value: u8) -> Result<Option<Op>, Error> {
         // CV31/CV32 select the CV index page (S-9.2.2). This decoder does not implement
         // indexed CVs, so the writes are silently ignored (matches core0.c:write_cv_handler).
-        if address == 31 || address == 32 {
+        if cv == 31 || cv == 32 {
             return Ok(None);
         }
 
-        let write = match Cv::try_from(address) {
+        let write = match Cv::try_from(cv) {
             Ok(addr) => match addr {
                 Cv::PrimaryAddress => {
-                    let value = packet.cv_data()?;
                     if !(1..=127).contains(&value) {
                         // return an error if the value is not in the valid primary address
                         // range
@@ -185,7 +245,7 @@ where
                 // read only cvs
                 Cv::ManufacturerId => {
                     // Reset all CVs to default when setting CV_8 = 8)
-                    if packet.cv_data()? == 8 {
+                    if value == 8 {
                         self.reset_to_factory_defaults()?;
                         return Ok(Some(Reboot));
                     }
@@ -194,7 +254,7 @@ where
 
                 Cv::ManufacturerVersionNumber => {
                     // ADC offset Adjustment is triggered when setting CV_7 = 7
-                    if packet.cv_data()? == 7 {
+                    if value == 7 {
                         self.store.emf_adc_offset_clear()?;
                         return Ok(Some(Reboot));
                     }
@@ -206,7 +266,6 @@ where
                     // CV17 holds the high 6 bits of the extended address and must be in
                     // 192..=231. CV17 == 192 with CV18 == 0 would form address 0, which is
                     // invalid. (core0.c:write_cv_handler)
-                    let value = packet.cv_data()?;
                     let cv18 = self.store.read_byte(Cv::ExtendedAddressLsb as usize)?;
                     if !(192..=231).contains(&value) || (cv18 == 0 && value == 192) {
                         return Err(PacketError::InvalidInstruction.into());
@@ -219,7 +278,6 @@ where
                 Cv::ExtendedAddressLsb => {
                     // CV18 holds the low 8 bits. Reject the value that would form address 0
                     // when CV17 is already at its minimum (192). (core0.c:write_cv_handler)
-                    let value = packet.cv_data()?;
                     let cv17 = self.store.read_byte(Cv::ExtendedAddressMsb as usize)?;
                     if cv17 == 192 && value == 0 {
                         return Err(PacketError::InvalidInstruction.into());
@@ -236,7 +294,7 @@ where
         };
 
         if write {
-            self.store.write_byte(address as usize, packet.cv_data()?)?;
+            self.store.write_byte(cv as usize, value)?;
         }
 
         Ok(Some(AcknowledgeCv))
@@ -249,29 +307,29 @@ where
     }
 
     fn manipulate_bit(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        // cv_data format: 111KDBBB
+        self.manipulate_cv_bit(
+            ManipulateBit::new(
+                packet.cv_address()?,
+                packet.cv_data()?,
+            )?
+        )
+    }
 
-        let packed = packet.cv_data()?;
+    /// Verifies or writes a single bit of `cv`.
+    ///
+    /// Shared by service mode and operations mode.
+    fn manipulate_cv_bit(&mut self, mb: ManipulateBit) -> Result<Option<Op>, Error> {
 
-        // top 3 bits must be 111
-        if packed < 0b1110_0000 {
-            return Err(PacketError::InvalidInstruction.into());
-        }
+        let is_write = mb.is_write();
+        let d_val = mb.bit_value();
+        let bit_pos = mb.bit_pos();
 
-        // unpack the data
-        // k - 1 = write, 0 = read
-        // d - bit value
-        // bbb - BBB represents the bit position within the CV (000 being defined as bit 0)
-        let is_write = (packed & 0b0001_0000) != 0; // K bit
-        let d_val = (packed & 0b0000_1000) >> 3; // D bit
-        let bit_pos = packed & 0b0000_0111; // BBB
-
-        let cv_addr = packet.cv_address()? as usize;
+        let cv_addr = mb.cv_address() as usize;
         let current = self.store.read_byte(cv_addr)?;
         let mask = 1u8 << bit_pos;
 
         if is_write {
-            // Write Bit operation - branchless bit manipulation
+            // Write Bit operation - clear the current bit, and or it with the incoming bit
             let new_val = (current & !mask) | (d_val << bit_pos);
             self.store.write_byte(cv_addr, new_val)?;
             Ok(Some(AcknowledgeCv))
@@ -1131,5 +1189,294 @@ mod tests {
                 "CV7 = {value}: CV7 is read only"
             );
         }
+    }
+
+    // Programming on the Main (POM)
+
+    const POM_ADDR: u8 = 3;
+
+    /// Builds a long form CV access packet: `gg` = 0b01 verify, 0b11 write byte,
+    /// 0b10 bit manipulation.
+    fn pom_packet(addr: u16, gg: u8, cv: u16, data: u8) -> Packet {
+        let a = cv - 1;
+        operation_packet(
+            addr,
+            &[0b1110_0000 | (gg << 2) | (a >> 8) as u8, a as u8, data],
+        )
+    }
+
+    fn pom_write_packet(cv: u16, value: u8) -> Packet {
+        pom_packet(POM_ADDR as u16, 0b11, cv, value)
+    }
+
+    fn pom_bit_packet(cv: u16, write: bool, bit_pos: u8, bit_val: u8) -> Packet {
+        let packed = 0b1110_0000 | ((write as u8) << 4) | (bit_val << 3) | bit_pos;
+        pom_packet(POM_ADDR as u16, 0b10, cv, packed)
+    }
+
+    fn pom_harness() -> TestHarness {
+        TestHarness::with_address(POM_ADDR)
+    }
+
+    #[test]
+    fn test_pom_write_byte_requires_two_identical_packets() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        assert_eq!(harness.handle(&packet), Ok(None));
+        assert_eq!(harness.read_cv(3), 0, "first packet must not write");
+
+        assert_eq!(harness.handle(&packet), Ok(None), "POM never acknowledges");
+        assert_eq!(harness.read_cv(3), 0x42);
+    }
+
+    #[test]
+    fn test_pom_write_byte_with_extended_address() {
+        let mut harness = TestHarness::with_extended_address(1000);
+        let packet = pom_packet(1000, 0b11, 3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(harness.read_cv(3), 0x42);
+    }
+
+    #[test]
+    fn test_pom_write_repeated_packets_are_harmless() {
+        // command stations repeat POM packets: arm, execute, arm, execute
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        for _ in 0..4 {
+            assert_eq!(harness.handle(&packet), Ok(None));
+        }
+
+        assert_eq!(harness.read_cv(3), 0x42);
+    }
+
+    #[test]
+    fn test_pom_write_invalidated_by_packet_to_us() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        harness
+            .handle(&advanced_speed_step_packet(
+                POM_ADDR as u16,
+                SpeedStep::Idx(10),
+            ))
+            .unwrap();
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(
+            harness.read_cv(3),
+            0,
+            "intervening packet must cancel the write"
+        );
+
+        // the write after the cancelled one acts as a new first packet
+        harness.handle(&packet).unwrap();
+        assert_eq!(harness.read_cv(3), 0x42);
+    }
+
+    #[test]
+    fn test_pom_write_invalidated_by_invalid_packet_to_us() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        // GG = 00 is reserved: an error, but still a packet to this decoder
+        assert!(
+            harness
+                .handle(&pom_packet(POM_ADDR as u16, 0b00, 3, 0x42))
+                .is_err()
+        );
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(harness.read_cv(3), 0);
+    }
+
+    #[test]
+    fn test_pom_write_invalidated_by_broadcast() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        harness
+            .handle(&advanced_speed_step_packet(0, SpeedStep::Stop))
+            .unwrap();
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(harness.read_cv(3), 0);
+    }
+
+    #[test]
+    fn test_pom_write_invalidated_by_reset_packet() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        harness.handle(&reset_packet()).unwrap();
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(harness.read_cv(3), 0);
+    }
+
+    #[test]
+    fn test_pom_write_survives_packet_to_other_decoder() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        harness
+            .handle(&advanced_speed_step_packet(
+                POM_ADDR as u16 + 1,
+                SpeedStep::Idx(10),
+            ))
+            .unwrap();
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(harness.read_cv(3), 0x42);
+    }
+
+    #[test]
+    fn test_pom_write_different_packets_replace_pending() {
+        let mut harness = pom_harness();
+
+        harness.handle(&pom_write_packet(3, 0x11)).unwrap();
+        harness.handle(&pom_write_packet(3, 0x22)).unwrap();
+        assert_eq!(harness.read_cv(3), 0, "neither write is complete");
+
+        harness.handle(&pom_write_packet(3, 0x22)).unwrap();
+        assert_eq!(harness.read_cv(3), 0x22);
+    }
+
+    #[test]
+    fn test_pom_write_bit() {
+        let mut harness = TestHarness::with_store(
+            MockStore::new()
+                .with_cv(PrimaryAddress as u16, POM_ADDR)
+                .with_cv(3, 0b0000_0001),
+        );
+
+        let set = pom_bit_packet(3, true, 7, 1);
+        harness.handle(&set).unwrap();
+        assert_eq!(
+            harness.read_cv(3),
+            0b0000_0001,
+            "first packet must not write"
+        );
+        assert_eq!(harness.handle(&set), Ok(None));
+        assert_eq!(harness.read_cv(3), 0b1000_0001);
+
+        let clear = pom_bit_packet(3, true, 0, 0);
+        harness.handle(&clear).unwrap();
+        harness.handle(&clear).unwrap();
+        assert_eq!(harness.read_cv(3), 0b1000_0000);
+    }
+
+    #[test]
+    fn test_pom_verify_is_a_noop() {
+        let mut harness = TestHarness::with_store(
+            MockStore::new()
+                .with_cv(PrimaryAddress as u16, POM_ADDR)
+                .with_cv(3, 0x42),
+        );
+
+        // matching verify byte and verify bit: no RailCom, so no response at all
+        let verify_byte = pom_packet(POM_ADDR as u16, 0b01, 3, 0x42);
+        let verify_bit = pom_bit_packet(3, false, 1, 1);
+        for packet in [&verify_byte, &verify_byte, &verify_bit, &verify_bit] {
+            assert_eq!(harness.handle(packet), Ok(None));
+        }
+        assert_eq!(harness.read_cv(3), 0x42);
+    }
+
+    #[test]
+    fn test_pom_verify_invalidates_pending_write() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(3, 0x42);
+
+        harness.handle(&packet).unwrap();
+        harness
+            .handle(&pom_packet(POM_ADDR as u16, 0b01, 3, 0))
+            .unwrap();
+        harness.handle(&packet).unwrap();
+
+        assert_eq!(harness.read_cv(3), 0);
+    }
+
+    #[test]
+    fn test_pom_write_to_broadcast_address_is_ignored() {
+        let mut harness = pom_harness();
+        let packet = pom_packet(0, 0b11, 3, 0x42);
+
+        assert_eq!(harness.handle(&packet), Ok(None));
+        assert_eq!(harness.handle(&packet), Ok(None));
+        assert_eq!(harness.read_cv(3), 0);
+    }
+
+    #[test]
+    fn test_pom_write_shares_service_mode_validation() {
+        // CV1 out of range is rejected
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(PrimaryAddress as u16, 0);
+        harness.handle(&packet).unwrap();
+        assert_eq!(
+            harness.handle(&packet),
+            Err(Error::Packet(PacketError::InvalidInstruction))
+        );
+        assert_eq!(harness.read_cv(PrimaryAddress as usize), POM_ADDR);
+
+        // CV31 / CV32 are ignored
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(31, 5);
+        harness.handle(&packet).unwrap();
+        assert_eq!(harness.handle(&packet), Ok(None));
+        assert_eq!(harness.read_cv(31), 0);
+    }
+
+    #[test]
+    fn test_pom_write_primary_address_changes_address_without_ack() {
+        let mut harness = pom_harness();
+        let packet = pom_write_packet(PrimaryAddress as u16, 5);
+
+        harness.handle(&packet).unwrap();
+        assert_eq!(harness.handle(&packet), Ok(None));
+        assert_eq!(harness.read_cv(PrimaryAddress as usize), 5);
+
+        // the decoder now answers to the new address only
+        assert_eq!(harness.handle(&packet), Ok(None), "old address is ignored");
+        let v = advanced_speed_step_packet(5, SpeedStep::Idx(10));
+        assert!(matches!(harness.handle(&v), Ok(Some(Op::Velocity128(_)))));
+    }
+
+    #[test]
+    fn test_pom_write_cv8_8_resets_and_reboots() {
+        let mut harness = TestHarness::with_store(
+            MockStore::new()
+                .with_cv(PrimaryAddress as u16, POM_ADDR)
+                .with_cv(3, 0x42),
+        );
+        let packet = pom_write_packet(Cv::ManufacturerId as u16, 8);
+
+        harness.handle(&packet).unwrap();
+        assert_eq!(harness.handle(&packet), Ok(Some(Reboot)));
+        assert_ne!(harness.read_cv(3), 0x42, "CVs reset to defaults");
+    }
+
+    #[test]
+    fn test_pom_write_cv7_7_clears_adc_offset_and_reboots() {
+        let mut harness = TestHarness::with_store(
+            MockStore::new()
+                .with_cv(PrimaryAddress as u16, POM_ADDR)
+                .with_cv(Cv::ManufacturerVersionNumber as u16, CV7_VERSION)
+                .with_cv(Cv::EmfAdcOffset as u16, EMF_ADC_OFFSET),
+        );
+        let packet = pom_write_packet(Cv::ManufacturerVersionNumber as u16, 7);
+
+        harness.handle(&packet).unwrap();
+        assert_eq!(harness.handle(&packet), Ok(Some(Reboot)));
+        assert_eq!(harness.read_cv(Cv::EmfAdcOffset as usize), u8::MAX);
     }
 }

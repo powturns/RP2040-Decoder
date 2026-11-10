@@ -51,7 +51,7 @@ pub trait Store {
     fn read_byte(&self, address: usize) -> Result<u8, Error>;
 
     /// Reads a range of configuration variables from the specified start CV address (1-indexed).
-    fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error>;
+    fn read_bytes(&self, address: usize, len: usize) -> Result<&[u8], Error>;
 
     /// writes a single configuration variable to the specified CV address (1-indexed).
     fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error>;

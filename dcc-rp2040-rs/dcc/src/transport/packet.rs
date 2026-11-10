@@ -119,6 +119,8 @@ pub enum OperationModeInstruction {
     /// Not to be confused with an [AdvancedOperationsInstruction::SpeedStepControl].
     SpeedAndDirection(VelocitySetpoint),
     FunctionGroup(FunctionGroup),
+    /// A configuration variable access (Programming on the Main) instruction.
+    CvAccess(CvAccess),
 }
 
 #[derive(Eq, PartialEq, Copy, Clone)]
@@ -126,6 +128,37 @@ pub enum OperationModeInstruction {
 #[cfg_attr(test, derive(Debug))]
 pub enum AdvancedOperationsInstruction {
     SpeedStepControl(VelocitySetpoint),
+}
+
+/// A long form configuration variable access instruction (S-9.2.1 §2.3.7.3).
+///
+/// `cv` is the 1-based CV number.
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
+pub enum CvAccess {
+    VerifyByte {
+        cv: u16,
+        value: u8,
+    },
+    WriteByte {
+        cv: u16,
+        value: u8,
+    },
+    ManipulateBit(ManipulateBit),
+}
+
+impl CvAccess {
+    /// Returns `true` if the instruction modifies the CV.
+    ///
+    /// Modifying instructions are only executed after two identical packets.
+    pub fn is_write(&self) -> bool {
+        match self {
+            CvAccess::VerifyByte { .. } => false,
+            CvAccess::WriteByte { .. } => true,
+            CvAccess::ManipulateBit(b) => b.is_write(),
+        }
+    }
 }
 
 impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
@@ -165,8 +198,96 @@ impl<'a> TryFrom<&'a Packet> for OperationModeInstruction {
                     .map(OperationModeInstruction::FunctionGroup)
                     .ok_or(Error::InvalidInstruction)
             }
-            OperationInstructionType::CVAccess => Err(Error::InvalidInstruction),
+            OperationInstructionType::CVAccess => {
+                decode_cv_access(data).map(OperationModeInstruction::CvAccess)
+            }
         }
+    }
+}
+
+/// Verify or write a single bit.
+#[derive(Eq, PartialEq, Copy, Clone)]
+#[cfg_attr(feature = "defmt", derive(defmt::Format))]
+#[cfg_attr(test, derive(Debug))]
+pub struct ManipulateBit {
+    cv: u16,
+    /// The packed instruction the format `111FDBBB`.
+    ///
+    /// - F: 1 for a write, 0 for a verify;
+    /// - D: bit value;
+    /// - BBB: bit position.
+    instruction: u8,
+}
+
+impl ManipulateBit {
+    const WRITE_FLAG_MASK: u8 = 0b0001_0000;
+    const INSTRUCTION_PREFIX_MASK: u8 = 0b1110_0000;
+    const POSITION_MASK: u8 = 0b0000_0111;
+    const VALUE_MASK: u8 = 0b0000_1000;
+
+    /// Creates a new ManipulateBit instruction, returning
+    /// an error if the packed instruction is invalid.
+    pub fn new(cv: u16, instruction: u8) -> Result<Self, Error> {
+        if !Self::instruction_valid(instruction) {
+            Err(Error::InvalidInstruction)
+        } else {
+            Ok(Self { cv, instruction })
+        }
+    }
+
+    /// `true` if the bit manipulation is a write.
+    pub fn is_write(&self) -> bool {
+        self.instruction & Self::WRITE_FLAG_MASK != 0
+    }
+
+    /// Returns the bit position.
+    pub fn bit_pos(&self) -> u8 {
+        self.instruction & Self::POSITION_MASK
+    }
+
+    /// Value of the bit.
+    pub fn bit_value(&self) -> u8 {
+        (self.instruction & Self::VALUE_MASK) >> 3
+    }
+
+    /// The target CV address.
+    pub fn cv_address(&self) -> u16 {
+        self.cv
+    }
+
+    /// Checks if the packed instruction is valid.
+    fn instruction_valid(instruction: u8) -> bool {
+        instruction & Self::INSTRUCTION_PREFIX_MASK == Self::INSTRUCTION_PREFIX_MASK
+    }
+}
+
+/// Decodes a long form configuration variable access instruction:
+/// `1110GGVV VVVVVVVV DDDDDDDD`.
+///
+/// The short form (`1111GGGG`) and XPOM (more than 3 instruction bytes) are not supported.
+fn decode_cv_access(data: &[u8]) -> Result<CvAccess, Error> {
+    let &[first, low, value] = data else {
+        return Err(Error::InvalidInstruction);
+    };
+
+    // verify the instruction is of long form.
+    if first & 0b1111_0000 != 0b1110_0000 {
+        return Err(Error::InvalidInstruction);
+    }
+
+    // 10-bit address; the CV number is the address plus 1
+    // the MSB cv bits are from the two LSB (VV) of the first data packet.
+    let cv = ((u16::from(first & 0b11) << 8) | u16::from(low)) + 1;
+
+    // Extract the access instruction from the GG bits
+    match (first >> 2) & 0b11 {
+        0b01 => Ok(CvAccess::VerifyByte { cv, value }),
+        0b11 => Ok(CvAccess::WriteByte { cv, value }),
+        0b10 if value & 0b1110_0000 == 0b1110_0000 => {
+            ManipulateBit::new(cv, value).map(CvAccess::ManipulateBit)
+        }
+        // GG = 00 is reserved
+        _ => Err(Error::InvalidInstruction),
     }
 }
 
@@ -774,5 +895,102 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// Builds a long form CV access instruction (without the address).
+    fn cv_access_instruction(gg: u8, cv: u16, data: u8) -> [u8; 3] {
+        let a = cv - 1;
+        [0b1110_0000 | (gg << 2) | (a >> 8) as u8, a as u8, data]
+    }
+
+    fn decode_cv_access_packet(
+        addr: &[u8],
+        instruction: &[u8],
+    ) -> Result<OperationModeInstruction, Error> {
+        let mut data = heapless::Vec::<u8, 6>::new();
+        data.extend_from_slice(addr).unwrap();
+        data.extend_from_slice(instruction).unwrap();
+        OperationModeInstruction::try_from(&Packet { data })
+    }
+
+    #[test]
+    fn cv_access_long_form_decodes_operation_and_cv() {
+        for cv in [1u16, 2, 256, 257, 1024] {
+            assert_eq!(
+                decode_cv_access_packet(&[3], &cv_access_instruction(0b11, cv, 0xAB)),
+                Ok(OperationModeInstruction::CvAccess(CvAccess::WriteByte {
+                    cv,
+                    value: 0xAB
+                })),
+                "write byte cv={cv}"
+            );
+            assert_eq!(
+                decode_cv_access_packet(&[3], &cv_access_instruction(0b01, cv, 0x12)),
+                Ok(OperationModeInstruction::CvAccess(CvAccess::VerifyByte {
+                    cv,
+                    value: 0x12
+                })),
+                "verify byte cv={cv}"
+            );
+            assert_eq!(
+                decode_cv_access_packet(&[3], &cv_access_instruction(0b10, cv, 0b1111_1101)),
+                Ok(OperationModeInstruction::CvAccess(
+                    CvAccess::ManipulateBit(ManipulateBit::new(cv, 0b1111_1101).unwrap())
+                )),
+                "manipulate bit cv={cv}"
+            );
+        }
+    }
+
+    #[test]
+    fn cv_access_long_form_with_long_address() {
+        // address 1000 = 0xC3 0xE8
+        assert_eq!(
+            decode_cv_access_packet(&[0xC3, 0xE8], &cv_access_instruction(0b11, 29, 0x22)),
+            Ok(OperationModeInstruction::CvAccess(CvAccess::WriteByte {
+                cv: 29,
+                value: 0x22
+            }))
+        );
+    }
+
+    #[test]
+    fn cv_access_unsupported_forms_are_rejected() {
+        let cases: [&[u8]; 6] = [
+            // GG = 00 is reserved
+            &cv_access_instruction(0b00, 1, 0),
+            // bit manipulation without 111 in the upper bits of the data byte
+            &cv_access_instruction(0b10, 1, 0b0001_0000),
+            // short form: 1111GGGG (acceleration adjustment)
+            &[0b1111_0010, 0x05],
+            &[0b1111_0100, 0xC3, 0xE8],
+            // too short
+            &[0b1110_1100, 0x00],
+            // XPOM style / too long
+            &[0b1110_1100, 0x00, 0x00, 0x00, 0x00],
+        ];
+
+        for instruction in cases {
+            // a 1-byte address keeps the packet within 6 bytes for every case
+            assert_eq!(
+                decode_cv_access_packet(&[3], instruction),
+                Err(Error::InvalidInstruction),
+                "instruction {instruction:02X?}"
+            );
+        }
+    }
+
+    #[test]
+    fn cv_access_is_write() {
+        assert!(!CvAccess::VerifyByte { cv: 1, value: 0 }.is_write());
+        assert!(CvAccess::WriteByte { cv: 1, value: 0 }.is_write());
+        assert!(
+            CvAccess::ManipulateBit(ManipulateBit::new(1, 0b1111_0000).unwrap())
+            .is_write()
+        );
+        assert!(
+            !CvAccess::ManipulateBit(ManipulateBit::new(1, 0b1110_0000).unwrap())
+            .is_write()
+        );
     }
 }

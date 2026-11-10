@@ -31,7 +31,7 @@ use ::motor::speed::{
     Config as SpeedConfig, Controller as SpeedController, PidConfig, StartupConfig, accel,
 };
 use assign_resources::assign_resources;
-use dcc::cv::store::{ensure_populated, Store, StoreExt};
+use dcc::cv::store::{Store, StoreExt, ensure_populated, reset};
 use dcc::handler::{Handler, Op};
 use embassy_executor::Spawner;
 use embassy_rp::adc;
