@@ -27,11 +27,11 @@ fn read_extended_address(data: &[u8]) -> u16 {
 }
 
 /// Checks to see if the packet is addressed to the specific decoder.
-pub(crate) fn is_recipient(packet: &Packet, store: &impl Store) -> bool {
-    packet
-        .addr()
-        .map(|a| store.addr().map(|b| a == b).unwrap_or(false))
-        .unwrap_or(false)
+pub(crate) async fn is_recipient(packet: &Packet, store: &impl Store) -> bool {
+    match packet.addr() {
+        Ok(a) => store.addr().await.map(|b| a == b).unwrap_or(false),
+        Err(_) => false,
+    }
 }
 
 /// Checks to see if the packet is addressed to the broadcast address.

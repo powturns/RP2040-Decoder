@@ -19,6 +19,7 @@ dependencies = [
  "embassy-sync",
  "embassy-time",
  "embedded-hal 1.0.0",
+ "embedded-storage-async",
  "fixed",
  "fixed-macro",
  "math",
@@ -27,6 +28,7 @@ dependencies = [
  "panic-reset",
  "portable-atomic",
  "regex",
+ "sequential-storage",
  "static_cell",
 ]
 
@@ -324,7 +326,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "defmt 1.2.0",
- "heapless",
+ "heapless 0.9.3",
  "int-enum",
  "motor",
 ]
@@ -559,7 +561,7 @@ dependencies = [
  "embedded-io-async 0.7.0",
  "futures-core",
  "futures-sink",
- "heapless",
+ "heapless 0.9.3",
 ]
 
 [[package]]
@@ -595,7 +597,7 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "168297bf80aaf114b3c9ad589bf38b01b3009b9af7f97cd18086c5bbf96f5693"
 dependencies = [
  "embassy-executor-timer-queue",
- "heapless",
+ "heapless 0.9.3",
 ]
 
 [[package]]
@@ -833,6 +835,16 @@ name = "hashbrown"
 version = "0.17.1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "ed5909b6e89a2db4456e54cd5f673791d7eca6732202bbf2a9cc504fe2f9b84a"
+
+[[package]]
+name = "heapless"
+version = "0.8.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "0bfb9eb618601c89945a70e254898da93b13be0388091d42117462b265bb3fad"
+dependencies = [
+ "hash32",
+ "stable_deref_trait",
+]
 
 [[package]]
 name = "heapless"
@@ -1414,6 +1426,17 @@ name = "semver-parser"
 version = "0.7.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "388a1df253eca08550bef6c72392cfe7c30914bf41df5269b68cbd6ff8f570a3"
+
+[[package]]
+name = "sequential-storage"
+version = "8.0.2"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "1550e4d0c7a6a54e2d7884309dc6bfe206d2d8884cb5498177fd936cb233616d"
+dependencies = [
+ "defmt 1.2.0",
+ "embedded-storage-async",
+ "heapless 0.8.0",
+]
 
 [[package]]
 name = "sha2-const-stable"

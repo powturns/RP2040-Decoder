@@ -25,18 +25,26 @@ impl Config {
     }
 }
 
-pub fn new_handler<T: Store>(store: &T, resources: FunctionGroupOutputResources) -> Handler {
-    let pwm_enabled_mask = unwrap!(store.pwm_enabled_mask());
-    let function_map_forward: [u32; 32] = core::array::from_fn(|idx| {
-        unwrap!(unwrap!(
-            store.function_output_mask(idx as u8, Direction::Forward)
-        ))
-    });
-    let function_map_reverse: [u32; 32] = core::array::from_fn(|idx| {
-        unwrap!(unwrap!(
-            store.function_output_mask(idx as u8, Direction::Reverse)
-        ))
-    });
+pub async fn new_handler<T: Store>(store: &T, resources: FunctionGroupOutputResources) -> Handler {
+    let pwm_enabled_mask = unwrap!(store.pwm_enabled_mask().await);
+    let mut function_map_forward = [0u32; 32];
+    let mut function_map_reverse = [0u32; 32];
+    for (idx, (fwd, rev)) in function_map_forward
+        .iter_mut()
+        .zip(function_map_reverse.iter_mut())
+        .enumerate()
+    {
+        *fwd = unwrap!(unwrap!(
+            store
+                .function_output_mask(idx as u8, Direction::Forward)
+                .await
+        ));
+        *rev = unwrap!(unwrap!(
+            store
+                .function_output_mask(idx as u8, Direction::Reverse)
+                .await
+        ));
+    }
     let config = Config::new(function_map_forward, function_map_reverse);
 
     let FunctionGroupOutputResources {
@@ -57,11 +65,14 @@ pub fn new_handler<T: Store>(store: &T, resources: FunctionGroupOutputResources)
         pwm_slice5,
     } = resources;
 
-    let (gpio0, gpio1) = build_slice_outputs(pwm_enabled_mask, pwm_slice0, gpio0, gpio1, store);
-    let (gpio2, gpio3) = build_slice_outputs(pwm_enabled_mask, pwm_slice1, gpio2, gpio3, store);
-    let (gpio4, gpio5) = build_slice_outputs(pwm_enabled_mask, pwm_slice2, gpio4, gpio5, store);
-    let (aux0, aux1) = build_slice_outputs(pwm_enabled_mask, pwm_slice4, aux0, aux1, store);
-    let (aux2, aux3) = build_slice_outputs(pwm_enabled_mask, pwm_slice5, aux2, aux3, store);
+    let (gpio0, gpio1) =
+        build_slice_outputs(pwm_enabled_mask, pwm_slice0, gpio0, gpio1, store).await;
+    let (gpio2, gpio3) =
+        build_slice_outputs(pwm_enabled_mask, pwm_slice1, gpio2, gpio3, store).await;
+    let (gpio4, gpio5) =
+        build_slice_outputs(pwm_enabled_mask, pwm_slice2, gpio4, gpio5, store).await;
+    let (aux0, aux1) = build_slice_outputs(pwm_enabled_mask, pwm_slice4, aux0, aux1, store).await;
+    let (aux2, aux3) = build_slice_outputs(pwm_enabled_mask, pwm_slice5, aux2, aux3, store).await;
 
     let output_drivers = OutputDrivers {
         gpio0,
@@ -153,7 +164,7 @@ impl Handler {
     }
 }
 
-fn build_slice_outputs<TSlice, PA, PB, S>(
+async fn build_slice_outputs<TSlice, PA, PB, S>(
     pwm_enabled_mask: u32,
     slice: Peri<'static, TSlice>,
     pin_a: Peri<'static, PA>,
@@ -170,7 +181,7 @@ where
     let num_b = pin_b.pin();
     let pwm_a = (pwm_enabled_mask & (1u32 << num_a)) != 0;
     let pwm_b = (pwm_enabled_mask & (1u32 << num_b)) != 0;
-    let cfg = unwrap!(unwrap!(store.pwm_configuration(slice.number() as u8)));
+    let cfg = unwrap!(unwrap!(store.pwm_configuration(slice.number() as u8).await));
 
     if pwm_a || pwm_b {
         let mut pwm_cfg = pwm::Config::default();

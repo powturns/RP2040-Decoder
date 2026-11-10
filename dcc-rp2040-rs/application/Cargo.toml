@@ -34,6 +34,8 @@ assign-resources = "0.5.0"
 embassy-futures = "0.1.2"
 math = { path = "../math"}
 motor = { workspace = true }
+sequential-storage = { version = "8.0.2", features = ["heapless"] }
+embedded-storage-async = "0.4.2"
 
 [features]
 default = [
@@ -57,6 +59,7 @@ defmt = [
     "dcc-pio-frame/defmt",
     "motor/defmt",
     "embassy-futures/defmt",
+    "sequential-storage/defmt"
 ]
 
 probe-rs = [
@@ -68,6 +71,10 @@ verbose-transport = [
 ]
 
 verbose-motor = []
+
+# Persist CVs by erasing and rewriting a single flash sector on every write, instead of the
+# default wear-levelled sequential-storage store.
+cv-store-raw-flash = []
 
 skip-include = []
 [build-dependencies]

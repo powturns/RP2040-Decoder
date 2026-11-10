@@ -62,7 +62,7 @@ where
     }
 
     /// Handles the packet, returning any operation that needs to be performed.
-    pub fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+    pub async fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         // must receive two pending service packets in a row with no intervening packets.
         // Calling take unconditionally ensures any valid packet drops the pending packet.
         let pending_service_packet = self.pending_service_packet.take();
@@ -83,16 +83,16 @@ where
 
             self.enter_service_mode_timer.start();
 
-            self.handle_service_mode(packet, pending_service_packet)
-        } else if is_recipient(packet, &self.store) {
+            self.handle_service_mode(packet, pending_service_packet).await
+        } else if is_recipient(packet, &self.store).await {
             // this packet was specifically addressed to us (not a broadcast)
             self.enter_service_mode_timer.stop();
 
-            self.decode_operation_command(packet)
+            self.decode_operation_command(packet).await
         } else if is_broadcast(packet) {
             self.enter_service_mode_timer.stop();
 
-            self.decode_operation_command(packet)
+            self.decode_operation_command(packet).await
         } else {
             // packet not addressed to us. A pending POM write survives it.
             self.enter_service_mode_timer.stop();
@@ -101,7 +101,7 @@ where
     }
 
     /// decodes the operation command.
-    fn decode_operation_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+    async fn decode_operation_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
         // Any packet addressed to us (including broadcasts) invalidates a pending POM write.
         // The matching second packet of a write consumes it below.
         let pending_pom_write = self.pending_pom_packet.take();
@@ -109,7 +109,7 @@ where
         match OperationModeInstruction::try_from(packet)? {
             OperationModeInstruction::CvAccess(access) => {
                 if !is_broadcast(packet) {
-                    self.handle_pom(packet, access, pending_pom_write)
+                    self.handle_pom(packet, access, pending_pom_write).await
                 } else {
                     // CV access is only accepted when it is addressed to this decoder.
                     Ok(None)
@@ -136,7 +136,7 @@ where
     ///
     /// Writes are only executed when the packet is identical to `pending`, the previous
     /// write packet (S-9.2.1 §2.3.7.3).
-    fn handle_pom(
+    async fn handle_pom(
         &mut self,
         packet: &Packet,
         access: CvAccess,
@@ -154,8 +154,8 @@ where
         }
 
         let op = match access {
-            CvAccess::WriteByte { cv, value } => self.write_cv(cv, value)?,
-            CvAccess::ManipulateBit(mb) => self.manipulate_cv_bit(mb)?,
+            CvAccess::WriteByte { cv, value } => self.write_cv(cv, value).await?,
+            CvAccess::ManipulateBit(mb) => self.manipulate_cv_bit(mb).await?,
             CvAccess::VerifyByte { .. } => None,
         };
 
@@ -164,7 +164,7 @@ where
         Ok(op.filter(|op| *op == Reboot))
     }
 
-    fn handle_service_mode(
+    async fn handle_service_mode(
         &mut self,
         packet: &Packet,
         pending: Option<Packet>,
@@ -176,7 +176,7 @@ where
 
         // check for legacy reset packet
         if packet.data.len() == 2 && packet.data[..2] == [0b01111111, 0b00001000] {
-            self.reset_to_factory_defaults()?;
+            self.reset_to_factory_defaults().await?;
             return Ok(Some(Reboot));
         }
 
@@ -187,9 +187,9 @@ where
         );
 
         match packet_type {
-            ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet),
-            ServiceInstructionType::VerifyByte => self.verify_byte(packet),
-            ServiceInstructionType::WriteByte => self.write_byte(packet),
+            ServiceInstructionType::ManipulateBit => self.manipulate_bit(packet).await,
+            ServiceInstructionType::VerifyByte => self.verify_byte(packet).await,
+            ServiceInstructionType::WriteByte => self.write_byte(packet).await,
         }
     }
 
@@ -197,9 +197,9 @@ where
         Ok(Op::Reset)
     }
 
-    fn verify_byte(&self, packet: &Packet) -> Result<Option<Op>, Error> {
+    async fn verify_byte(&self, packet: &Packet) -> Result<Option<Op>, Error> {
         let expected = packet.cv_data()?;
-        let actual = self.store.read_byte(packet.cv_address()? as usize)?;
+        let actual = self.store.read_byte(packet.cv_address()? as usize).await?;
 
         let op = if expected == actual {
             Some(Op::AcknowledgeCv)
@@ -210,14 +210,14 @@ where
         Ok(op)
     }
 
-    fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        self.write_cv(packet.cv_address()?, packet.cv_data()?)
+    async fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        self.write_cv(packet.cv_address()?, packet.cv_data()?).await
     }
 
     /// Writes `value` to `cv`, applying the per-CV validation and side effects.
     ///
     /// Shared by service mode and operations mode.
-    fn write_cv(&mut self, cv: u16, value: u8) -> Result<Option<Op>, Error> {
+    async fn write_cv(&mut self, cv: u16, value: u8) -> Result<Option<Op>, Error> {
         // CV31/CV32 select the CV index page (S-9.2.2). This decoder does not implement
         // indexed CVs, so the writes are silently ignored (matches core0.c:write_cv_handler).
         if cv == 31 || cv == 32 {
@@ -232,13 +232,13 @@ where
                         // range
                         return Err(PacketError::InvalidInstruction.into());
                     }
-                    self.store.write_byte(Cv::PrimaryAddress as usize, value)?;
+                    self.store.write_byte(Cv::PrimaryAddress as usize, value).await?;
 
                     // clear the extended address mode bit and consist addresses
-                    let cv29 = self.store.read_byte(Cv::DecoderConfiguration as usize)?;
+                    let cv29 = self.store.read_byte(Cv::DecoderConfiguration as usize).await?;
                     self.store
-                        .write_byte(Cv::DecoderConfiguration as usize, cv29 & !0b00100000)?;
-                    self.store.write_byte(Cv::ConsistAddress as usize, 0)?;
+                        .write_byte(Cv::DecoderConfiguration as usize, cv29 & !0b00100000).await?;
+                    self.store.write_byte(Cv::ConsistAddress as usize, 0).await?;
                     return Ok(Some(AcknowledgeCv));
                 }
 
@@ -246,7 +246,7 @@ where
                 Cv::ManufacturerId => {
                     // Reset all CVs to default when setting CV_8 = 8)
                     if value == 8 {
-                        self.reset_to_factory_defaults()?;
+                        self.reset_to_factory_defaults().await?;
                         return Ok(Some(Reboot));
                     }
                     return Ok(None);
@@ -255,7 +255,7 @@ where
                 Cv::ManufacturerVersionNumber => {
                     // ADC offset Adjustment is triggered when setting CV_7 = 7
                     if value == 7 {
-                        self.store.emf_adc_offset_clear()?;
+                        self.store.emf_adc_offset_clear().await?;
                         return Ok(Some(Reboot));
                     }
 
@@ -266,24 +266,24 @@ where
                     // CV17 holds the high 6 bits of the extended address and must be in
                     // 192..=231. CV17 == 192 with CV18 == 0 would form address 0, which is
                     // invalid. (core0.c:write_cv_handler)
-                    let cv18 = self.store.read_byte(Cv::ExtendedAddressLsb as usize)?;
+                    let cv18 = self.store.read_byte(Cv::ExtendedAddressLsb as usize).await?;
                     if !(192..=231).contains(&value) || (cv18 == 0 && value == 192) {
                         return Err(PacketError::InvalidInstruction.into());
                     }
                     self.store
-                        .write_byte(Cv::ExtendedAddressMsb as usize, value)?;
+                        .write_byte(Cv::ExtendedAddressMsb as usize, value).await?;
                     return Ok(Some(AcknowledgeCv));
                 }
 
                 Cv::ExtendedAddressLsb => {
                     // CV18 holds the low 8 bits. Reject the value that would form address 0
                     // when CV17 is already at its minimum (192). (core0.c:write_cv_handler)
-                    let cv17 = self.store.read_byte(Cv::ExtendedAddressMsb as usize)?;
+                    let cv17 = self.store.read_byte(Cv::ExtendedAddressMsb as usize).await?;
                     if cv17 == 192 && value == 0 {
                         return Err(PacketError::InvalidInstruction.into());
                     }
                     self.store
-                        .write_byte(Cv::ExtendedAddressLsb as usize, value)?;
+                        .write_byte(Cv::ExtendedAddressLsb as usize, value).await?;
                     return Ok(Some(AcknowledgeCv));
                 }
 
@@ -294,44 +294,40 @@ where
         };
 
         if write {
-            self.store.write_byte(cv as usize, value)?;
+            self.store.write_byte(cv as usize, value).await?;
         }
 
         Ok(Some(AcknowledgeCv))
     }
 
-    fn reset_to_factory_defaults(&mut self) -> Result<(), Error> {
+    async fn reset_to_factory_defaults(&mut self) -> Result<(), Error> {
         info!("Resetting all CVs to default");
-        reset(&mut self.store)?;
+        reset(&mut self.store).await?;
         Ok(())
     }
 
-    fn manipulate_bit(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        self.manipulate_cv_bit(
-            ManipulateBit::new(
-                packet.cv_address()?,
-                packet.cv_data()?,
-            )?
-        )
+    async fn manipulate_bit(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
+        self.manipulate_cv_bit(ManipulateBit::new(packet.cv_address()?, packet.cv_data()?)?)
+            .await
     }
 
     /// Verifies or writes a single bit of `cv`.
     ///
     /// Shared by service mode and operations mode.
-    fn manipulate_cv_bit(&mut self, mb: ManipulateBit) -> Result<Option<Op>, Error> {
+    async fn manipulate_cv_bit(&mut self, mb: ManipulateBit) -> Result<Option<Op>, Error> {
 
         let is_write = mb.is_write();
         let d_val = mb.bit_value();
         let bit_pos = mb.bit_pos();
 
         let cv_addr = mb.cv_address() as usize;
-        let current = self.store.read_byte(cv_addr)?;
+        let current = self.store.read_byte(cv_addr).await?;
         let mask = 1u8 << bit_pos;
 
         if is_write {
             // Write Bit operation - clear the current bit, and or it with the incoming bit
             let new_val = (current & !mask) | (d_val << bit_pos);
-            self.store.write_byte(cv_addr, new_val)?;
+            self.store.write_byte(cv_addr, new_val).await?;
             Ok(Some(AcknowledgeCv))
         } else {
             // Bit Verify operation - direct XOR comparison
@@ -373,7 +369,7 @@ mod tests {
     use super::*;
     use crate::cv::Cv::{DecoderConfiguration, ExtendedAddressMsb, PrimaryAddress};
     use crate::handler::Op::Reset;
-    use crate::testing::{MockStore, MockTimer, pkt};
+    use crate::testing::{MockStore, MockTimer, block_on, pkt};
     use crate::transport::packet::Error as PacketError;
     use motor::{Direction, SpeedStep};
 
@@ -484,7 +480,7 @@ mod tests {
         }
 
         fn handle(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-            self.handler.handle(packet)
+            block_on(self.handler.handle(packet))
         }
 
         fn set_timer_elapsed(&mut self, elapsed: usize) {
@@ -505,10 +501,7 @@ mod tests {
         }
 
         fn read_cv(&self, addr: usize) -> u8 {
-            self.handler
-                .store
-                .read_byte(addr)
-                .expect("error reading cv")
+            block_on(self.handler.store.read_byte(addr)).expect("error reading cv")
         }
 
         /// Send the same packet twice and return the second result.

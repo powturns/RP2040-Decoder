@@ -42,7 +42,7 @@ impl MockStore {
 }
 
 impl Store for MockStore {
-    fn read_byte(&self, cv_id: usize) -> Result<u8, Error> {
+    async fn read_byte(&self, cv_id: usize) -> Result<u8, Error> {
         let idx = cv_id - 1;
 
         if (idx) < CV_SIZE {
@@ -52,7 +52,7 @@ impl Store for MockStore {
         }
     }
 
-    fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
+    async fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
         let start_idx = start - 1;
         if start_idx < CV_SIZE && start_idx + len <= CV_SIZE {
             Ok(&self.cvs[start_idx..start_idx + len])
@@ -61,7 +61,7 @@ impl Store for MockStore {
         }
     }
 
-    fn write_byte(&mut self, cv_id: usize, value: u8) -> Result<(), Error> {
+    async fn write_byte(&mut self, cv_id: usize, value: u8) -> Result<(), Error> {
         let idx = cv_id - 1;
 
         if idx < CV_SIZE {
@@ -72,7 +72,7 @@ impl Store for MockStore {
         }
     }
 
-    fn write_bytes(&mut self, start: usize, value: &[u8], force: bool) -> Result<(), Error> {
+    async fn write_bytes(&mut self, start: usize, value: &[u8], force: bool) -> Result<(), Error> {
         let start_idx = start - 1;
         if start_idx < CV_SIZE && start_idx + value.len() <= CV_SIZE {
             self.cvs[start_idx..start_idx + value.len()].copy_from_slice(value);
@@ -124,4 +124,18 @@ pub(crate) fn pkt(bytes: &[u8]) -> Packet {
     ));
 
     Packet { data }
+}
+
+/// Drives a future to completion on the current thread.
+///
+/// The mocks used in tests never return [Poll::Pending](core::task::Poll::Pending), so a busy
+/// poll loop with a no-op waker is sufficient.
+pub(crate) fn block_on<F: Future>(future: F) -> F::Output {
+    let mut future = core::pin::pin!(future);
+    let mut cx = core::task::Context::from_waker(core::task::Waker::noop());
+    loop {
+        if let core::task::Poll::Ready(output) = future.as_mut().poll(&mut cx) {
+            return output;
+        }
+    }
 }

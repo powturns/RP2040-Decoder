@@ -1,154 +1,56 @@
-use core::mem::MaybeUninit;
-use core::ops::{Deref, DerefMut, Range};
-use dcc::cv::CV_SIZE;
-use dcc::cv::store::{Error, Store};
-use embassy_rp::flash::{Async, Flash as RpFlash, Instance};
+//! CV store implementations.
+//!
+//! By default CVs are persisted with [`sequential_storage`] (wear-levelled, one map item per CV).
+//! Enable the `cv-store-raw-flash` feature to instead persist the whole CV array to a single
+//! flash sector, erasing and rewriting it on every write.
 
-/// A [Store] implementation that persists CVs to flash on the RP device.
-pub struct Flash<'d, T: Instance, const FLASH_SIZE: usize> {
-    /// The range of flash addresses used by cv data, relative to the start of the flash.
-    cv_data_range: Range<u32>,
-    flash: RpFlash<'d, T, Async, FLASH_SIZE>,
-    cache: AlignedCvArray,
+#[cfg(feature = "cv-store-raw-flash")]
+mod flash;
+#[cfg(not(feature = "cv-store-raw-flash"))]
+mod ss;
+
+pub use selected::{CvStore, new};
+
+/// Offset of the `CV_FLASH` region from the start of flash (the stores take offsets, not addresses).
+///
+/// A function rather than a `const`, since `FLASH_BASE` is a pointer and can't be cast in const eval.
+fn cv_flash_offset() -> u32 {
+    crate::CV_FLASH_ORIGIN as u32 - embassy_rp::flash::FLASH_BASE as u32
 }
 
-impl<'d, T: Instance, const FLASH_SIZE: usize> Flash<'d, T, FLASH_SIZE> {
-    /// Create a new store that uses flash for persistence.
-    ///
-    /// NOTE: `offset` is an offset from the flash start, NOT an absolute address.
-    pub async fn new(
-        mut flash: RpFlash<'d, T, Async, FLASH_SIZE>,
-        offset: u32,
-    ) -> Result<Self, Error> {
-        let cache = Self::read_cv_array(&mut flash, offset).await?;
+#[cfg(feature = "cv-store-raw-flash")]
+mod selected {
+    use crate::AppFlash;
+    use dcc::cv::store::Error;
 
-        Ok(Self {
-            flash,
-            cv_data_range: offset..offset + (cache.len().max(embassy_rp::flash::ERASE_SIZE) as u32),
-            cache,
-        })
-    }
+    /// The CV store selected by the `cv-store-raw-flash` feature.
+    pub type CvStore = super::flash::Flash<'static, embassy_rp::peripherals::FLASH, { crate::FLASH_SIZE }>;
 
-    /// Writes the cached configuration variables to flash and reloads the latest values.
-    fn sync_cvs(&mut self) -> Result<(), Error> {
-        // since we keep the entire cache in memory and nothing else is stored in this flash sector, we can erase and write it to flash.
-        // If we start storing additional items in flash (in the cv sector), we may need to read the entire sector (ERASE_SIZE) into memory, update the
-        // cv values.
-
-        let from = self.cv_data_range.start;
-        let to = self.cv_data_range.end;
-
-        trace!("erasing flash from {} to {}", from, to);
-
-        self.flash.blocking_erase(from, to).map_err(|e| {
-            error!("error erasing flash: {:?}", e);
-            Error::Io
-        })?;
-
-        self.flash
-            .blocking_write(from, self.cache.as_ref())
-            .map_err(|e| {
-                error!("error writing flash: {:?}", e);
-                Error::Io
-            })
-    }
-
-    /// Reads the configuration variables from flash into `data`.
-    ///
-    /// `data` must be aligned to a 4-byte boundary.
-    async fn read_cv_array_aligned(
-        flash: &mut RpFlash<'d, T, Async, FLASH_SIZE>,
-        offset: u32,
-        data: &mut [u8],
-    ) -> Result<(), Error> {
-        // verify alignment
-        assert_eq!((data.as_ptr() as u32) % 4, 0);
-
-        debug!(
-            "reading {} bytes from flash at offset 0x{:x}...",
-            data.len(),
-            offset
-        );
-
-        flash.read(offset, data).await.map_err(|e| {
-            error!("error reading flash: {:?}", e);
-            Error::Io
-        })?;
-
-        Ok(())
-    }
-
-    /// Reads a new configuration variable array from flash.
-    async fn read_cv_array(
-        flash: &mut RpFlash<'d, T, Async, FLASH_SIZE>,
-        offset: u32,
-    ) -> Result<AlignedCvArray, Error> {
-        // Allocate the cache without initializing it; we'll fill it directly from flash.
-        let mut uninit_cache: MaybeUninit<AlignedCvArray> = MaybeUninit::uninit();
-
-        let cache_ptr = uninit_cache.as_mut_ptr() as *mut u8;
-        let raw_bytes: &mut [u8] = unsafe { core::slice::from_raw_parts_mut(cache_ptr, CV_SIZE) };
-
-        Self::read_cv_array_aligned(flash, offset, raw_bytes).await?;
-
-        // SAFETY: read_cvs wrote all CV_SIZE bytes into the cache.
-        Ok(unsafe { uninit_cache.assume_init() })
+    /// Creates the CV store in the `CV_FLASH` region, loading the persisted CVs.
+    pub async fn new(flash: AppFlash) -> Result<CvStore, Error> {
+        // The raw store sizes its region from the CV array, so it only needs the start.
+        CvStore::new(flash, super::cv_flash_offset()).await
     }
 }
 
-impl<'d, T: Instance, const FLASH_SIZE: usize> Store for Flash<'d, T, FLASH_SIZE> {
-    fn read_byte(&self, address: usize) -> Result<u8, Error> {
-        // CVs are 1-indexed; address 0 is invalid
-        address
-            .checked_sub(1)
-            .and_then(|idx| self.cache.get(idx))
-            .copied()
-            .ok_or(Error::InvalidAddress)
-    }
+#[cfg(not(feature = "cv-store-raw-flash"))]
+mod selected {
+    use crate::{AppFlash, CV_FLASH_SIZE};
+    use dcc::cv::store::Error;
 
-    fn read_bytes(&self, start: usize, len: usize) -> Result<&[u8], Error> {
-        let start_idx = start - 1;
-        let end_idx = start_idx + len;
-        self.cache
-            .get(start_idx..end_idx)
-            .ok_or(Error::InvalidAddress)
-    }
+    /// Number of flash pages (erase sectors) available to the CV store.
+    const CV_FLASH_PAGES: usize = CV_FLASH_SIZE / embassy_rp::flash::ERASE_SIZE;
 
-    fn write_byte(&mut self, address: usize, value: u8) -> Result<(), Error> {
-        self.write_bytes(address, &[value], false)
-    }
+    /// Number of keys whose flash locations are cached; speeds up lookups when writing CVs.
+    const CV_KEY_POINTERS: usize = 16;
 
-    fn write_bytes(&mut self, address: usize, value: &[u8], force: bool) -> Result<(), Error> {
-        if address == 0 || address + value.len() - 1 > self.cache.len() {
-            return Err(Error::InvalidAddress);
-        }
-        let start_idx = address - 1;
-        let range = start_idx..start_idx + value.len();
+    /// The CV store selected by the `cv-store-raw-flash` feature.
+    pub type CvStore =
+        super::ss::SequentialStorage<AppFlash, CV_FLASH_PAGES, CV_FLASH_PAGES, CV_KEY_POINTERS>;
 
-        if !force && &self.cache[range.clone()] == value {
-            return Ok(());
-        }
-
-        trace!("writing cv address {}: value={:?}", address, value);
-
-        self.cache[range].copy_from_slice(value);
-        self.sync_cvs()
-    }
-}
-
-#[repr(align(4))]
-struct AlignedCvArray([u8; CV_SIZE]);
-
-impl Deref for AlignedCvArray {
-    type Target = [u8];
-
-    fn deref(&self) -> &Self::Target {
-        self.0.as_ref()
-    }
-}
-
-impl DerefMut for AlignedCvArray {
-    fn deref_mut(&mut self) -> &mut Self::Target {
-        self.0.as_mut()
+    /// Creates the CV store in the `CV_FLASH` region, loading the persisted CVs.
+    pub async fn new(flash: AppFlash) -> Result<CvStore, Error> {
+        let start = super::cv_flash_offset();
+        CvStore::new(flash, start..start + CV_FLASH_SIZE as u32).await
     }
 }
