@@ -1,7 +1,7 @@
 use crate::cv::Cv::*;
 use crate::cv::DEFAULT_VALUES;
 use crate::read_extended_address;
-use core::time::Duration;
+use embassy_time::Duration;
 use motor::Direction;
 
 // Output configuration CV ranges.

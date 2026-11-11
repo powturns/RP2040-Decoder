@@ -7,7 +7,7 @@ license = "MIT OR Apache-2.0"
 [dependencies]
 embassy-sync = { version = "0.8.0" }
 embassy-executor = { version = "0.10.0", features = ["platform-cortex-m", "executor-thread"] }
-embassy-time = { version = "0.5.1", features = [] }
+embassy-time = { workspace = true }
 embassy-rp = { version = "0.10.0", features = ["time-driver", "critical-section-impl", "rp2040", "intrinsics", "rom-v2-intrinsics"] }
 #embassy-boot-rp = { version = "0.4.0", features = [] }
 #embassy-embedded-hal = { version = "0.3.0" }

@@ -10,10 +10,16 @@
 //! - provides a simple anti-windup policy by holding integration while saturated.
 
 use core::ops::Range;
-use core::time::Duration;
+use embassy_time::Duration;
 
 use discrete_pid::pid::{PidConfig, PidConfigError, PidController, PidModifiers};
 use discrete_pid::time::Millis;
+
+/// `d` in seconds. embassy's Duration has no float accessor; going through micros keeps the math
+/// in u64/f32.
+fn as_secs_f32(d: Duration) -> f32 {
+    d.as_micros() as f32 / 1_000_000.0
+}
 
 #[derive(Eq, PartialEq)]
 #[cfg_attr(test, derive(Debug))]
@@ -142,8 +148,8 @@ impl Controller {
         inner_config.set_kp(1.0)?; // Placeholder: Kp is scheduled per call via `PidModifiers::p_scale`
         inner_config.set_ki(cfg.ki)?;
         inner_config.set_kd(cfg.kd)?;
-        inner_config.set_filter_tc(cfg.filter_tc.as_secs_f32())?;
-        inner_config.set_sample_time(cfg.sample_time)?;
+        inner_config.set_filter_tc(as_secs_f32(cfg.filter_tc))?;
+        inner_config.set_sample_time(core::time::Duration::from_micros(cfg.sample_time.as_micros()))?;
         inner_config.set_output_limits(0.0, cfg.output_max as f32)?;
         inner_config.set_use_derivative_on_measurement(true);
         inner_config.set_use_strict_causal_integrator(true);
@@ -239,7 +245,7 @@ impl Controller {
                 // checked_sub catches a timestamp going backwards without panicking here.
                 timestamp_ms
                     .checked_sub(last.0)
-                    .is_some_and(|dt| Duration::from_millis(dt) >= self.inner_config.sample_time())
+                    .is_some_and(|dt| core::time::Duration::from_millis(dt) >= self.inner_config.sample_time())
             }),
             "PID step at {}ms is less than one sample period after the previous step at {:?}ms",
             timestamp_ms,
@@ -339,7 +345,7 @@ mod tests {
     /// Integral increment for one step at `error`, with the default CV config.
     fn integral_step(error: f32) -> f32 {
         let cfg = default_cv_config();
-        cfg.ki * cfg.sample_time.as_secs_f32() * error
+        cfg.ki * as_secs_f32(cfg.sample_time) * error
     }
 
     #[test]

@@ -1,5 +1,5 @@
 use crate::{SpeedStep, VelocitySetpoint};
-use core::time::Duration;
+use embassy_time::Duration;
 
 #[cfg_attr(feature = "defmt", derive(defmt::Format))]
 pub struct Config {
@@ -405,7 +405,7 @@ mod tests {
             direction: Direction::Forward,
         });
 
-        let mut total_time = Duration::ZERO;
+        let mut total_time = Duration::MIN;
         loop {
             let (_, delay) = control.step();
             if delay == Duration::MAX {
@@ -437,7 +437,7 @@ mod tests {
             direction: Direction::Forward,
         });
 
-        let mut total_time = Duration::ZERO;
+        let mut total_time = Duration::MIN;
         loop {
             let (_, delay) = control.step();
             if delay == Duration::MAX {

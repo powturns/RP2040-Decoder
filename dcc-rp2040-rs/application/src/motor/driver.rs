@@ -249,14 +249,14 @@ async fn accel_helper_task(mut accel_helper: accel::Helper, speed_table: SpeedTa
                     accel_helper.set_target(v);
                     let (setpoint, delay) = accel_helper.step();
                     maybe_send_to_channel(setpoint);
-                    accel_timer = duration_to_timer(delay.try_into().unwrap_or(Duration::MAX))
+                    accel_timer = duration_to_timer(delay)
                 }
             },
             Either::Second(_) => {
                 // accel_timer expired
                 let (setpoint, delay) = accel_helper.step();
                 maybe_send_to_channel(setpoint);
-                accel_timer = duration_to_timer(delay.try_into().unwrap_or(Duration::MAX))
+                accel_timer = duration_to_timer(delay)
             }
         }
     }

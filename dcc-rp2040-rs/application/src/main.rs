@@ -45,7 +45,6 @@ use embassy_rp::{Peri, bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
-use embassy_time::Duration;
 use functions::handler::Handler as FunctionGroupHandler;
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
@@ -254,9 +253,7 @@ async fn main(spawner: Spawner) {
             pwm_clk_divider: fixed::FixedU16::from_num(
                 unwrap!(cv_store.motor_pwm_divider().await) as u16
             ),
-            emf_measurement_delay: unwrap!(
-                unwrap!(cv_store.emf_measurement_delay().await).try_into()
-            ),
+            emf_measurement_delay: unwrap!(cv_store.emf_measurement_delay().await),
             emf_samples: unwrap!(cv_store.emf_samples().await),
             emf_l_cutoff: unwrap!(cv_store.emf_l_side_cutoff().await),
             emf_r_cutoff: unwrap!(cv_store.emf_r_side_cutoff().await),
@@ -311,10 +308,13 @@ async fn main(spawner: Spawner) {
         table::build(config)
     };
 
+    // The period the motor task ticks at, shared by the PID controller and the driver.
+    let pid_sample_time = unwrap!(cv_store.pid_sample_time().await);
+
     let speed_control = {
         let config = SpeedConfig::new(
             PidConfig {
-                sample_time: unwrap!(cv_store.pid_sample_time().await),
+                sample_time: pid_sample_time,
                 filter_tc: unwrap!(cv_store.pid_filter_tc().await),
                 ki: unwrap!(cv_store.pid_ki().await),
                 kd: unwrap!(cv_store.pid_kd().await),
@@ -349,7 +349,6 @@ async fn main(spawner: Spawner) {
         accel::Helper::new(config)
     };
 
-    let pid_sample_time = unwrap!(cv_store.pid_sample_time().await);
     let fg_handler = functions::handler::new_handler(&cv_store, r.function_group).await;
 
     let ph = Handler::new(InstantTimer::new(), cv_store);
@@ -372,9 +371,7 @@ async fn main(spawner: Spawner) {
     spawner.spawn(unwrap!(packet_handler(ph, fg_handler)));
     motor::driver::spawn(
         spawner,
-        pid_sample_time
-            .try_into()
-            .unwrap_or(Duration::from_millis(7)),
+        pid_sample_time,
         motor_driver,
         speed_control,
         accel_helper,

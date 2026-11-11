@@ -1,6 +1,6 @@
 use crate::speed::Mode::{Pid, Startup};
 use crate::speed::startup::ComputeResult;
-use core::time::Duration;
+use embassy_time::Duration;
 
 pub mod accel;
 mod pid;
@@ -430,9 +430,9 @@ mod tests {
 
     #[test]
     fn zero_sample_time_does_not_panic() {
-        assert_eq!(max_stall_count(Duration::ZERO), MIN_STALL_COUNT);
+        assert_eq!(max_stall_count(Duration::MIN), MIN_STALL_COUNT);
         // the controller rejects it as an invalid config instead of panicking
-        assert!(controller_with_sample_time(Duration::ZERO).is_err());
+        assert!(controller_with_sample_time(Duration::MIN).is_err());
     }
 
     #[test]

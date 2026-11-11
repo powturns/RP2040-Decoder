@@ -10,6 +10,7 @@ heapless = "0.9.3"
 defmt = { workspace = true, optional = true }
 int-enum = "1.3.0"
 motor = { workspace = true }
+embassy-time = { workspace = true }
 
 [dev-dependencies]
 motor = { workspace = true, features = ["debug"] }
@@ -23,5 +24,6 @@ verbose-transport = []
 defmt = [
     "dep:defmt",
     "heapless/defmt",
-    "motor/defmt"
+    "motor/defmt",
+    "embassy-time/defmt",
 ]

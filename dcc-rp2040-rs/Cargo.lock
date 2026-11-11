@@ -326,6 +326,7 @@ version = "0.1.0"
 dependencies = [
  "bitflags 2.13.2",
  "defmt 1.2.0",
+ "embassy-time",
  "heapless 0.9.3",
  "int-enum",
  "motor",
@@ -1007,6 +1008,7 @@ dependencies = [
  "assert_float_eq",
  "defmt 1.2.0",
  "discrete_pid",
+ "embassy-time",
 ]
 
 [[package]]

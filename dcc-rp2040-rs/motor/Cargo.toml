@@ -6,6 +6,7 @@ edition = "2024"
 [dependencies]
 defmt = { workspace = true, optional = true }
 discrete_pid = { version = "0.3.0", default-features = false }
+embassy-time = { workspace = true }
 
 [dev-dependencies]
 assert_float_eq = "1.2.0"
@@ -16,6 +17,7 @@ default = [
 
 defmt = [
     "dep:defmt",
+    "embassy-time/defmt",
 ]
 
 debug = []
