@@ -137,6 +137,17 @@ pub(crate) enum Cv {
     /// How frequently the control is updated from the control table (in ms)
     SpeedStepPeriod = 175,
 
+    /// Motor calibration control / status. Write 1 on the main track (POM) to start a
+    /// calibration run. Afterwards holds the result:
+    /// 2 = done, 3 = aborted, 4 = no motion, 5 = unstable reading, 6 = out of range.
+    MotorCalibration = 176,
+
+    /// Offset-corrected BEMF at full output from the last calibration (u16, CV177-178).
+    MotorCalibrationEmfMax = 177,
+
+    /// Calibration headroom: CV5 = emf_max * CV179 / 255 / 16.
+    MotorCalibrationHeadroom = 179,
+
     /// Start of the GPIO PWM enable mask (CV_112..CV_115).
     EnablePwmOutputMask = 112,
 }
@@ -347,10 +358,10 @@ const DEFAULT_VALUES: [u8; CV_SIZE] = [
     ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
     0b00000001, //CV_174  -  Additional motor-PWM clock divider.
     0b00000111, //CV_175  -  speed_helper timer delay -  can be used to adjust accel/decel rate
-    0b00000000, //CV_176  -
-    0b00000000, //CV_177  -
-    0b00000000, //CV_178  -
-    0b00000000, //CV_179  -
+    0b00000000, //CV_176  -  Motor calibration control / status (write 1 on the main to start)
+    0b00000000, //CV_177  -  Calibration emf_max Bits 8-15
+    0b00000000, //CV_178  -  Calibration emf_max Bits 0-7
+    0b11101011, //CV_179  -  Calibration headroom    Default = 235 -> 92%
     0b00000000, //CV_180  -
     0b00000000, //CV_181  -
     0b00000000, //CV_182  -

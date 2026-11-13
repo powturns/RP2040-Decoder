@@ -306,6 +306,9 @@ pub enum Command {
 
     Reset,
 
+    /// Starts a motor BEMF calibration run.
+    Calibrate,
+
     /// A 128 speed step velocity setpoint.
     SetVelocity128(VelocitySetpoint),
 }

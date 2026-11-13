@@ -26,6 +26,9 @@ pub enum Op {
 
     /// Reboots the decoder.
     Reboot,
+
+    /// Start a motor BEMF calibration run.
+    CalibrateMotor,
 }
 
 /// Contains the logic for handling packets.
@@ -43,7 +46,9 @@ where
     /// The first of two identical Programming on the Main (POM) write packets
     /// (S-9.2.1 §2.3.7.3).
     ///
-    /// Cleared by any other packet addressed to this decoder, including broadcasts.
+    /// Cleared by a reset packet, service mode, or any other CV access or invalid packet
+    /// addressed to this decoder. Speed and function packets leave it pending, because command
+    /// stations interleave them with the repeats of a write.
     pending_pom_packet: Option<Packet>,
 }
 
@@ -59,6 +64,16 @@ where
             pending_service_packet: None,
             pending_pom_packet: None,
         }
+    }
+
+    /// The CV store owned by the handler.
+    pub fn store(&self) -> &S {
+        &self.store
+    }
+
+    /// The CV store owned by the handler.
+    pub fn store_mut(&mut self) -> &mut S {
+        &mut self.store
     }
 
     /// Handles the packet, returning any operation that needs to be performed.
@@ -102,12 +117,26 @@ where
 
     /// decodes the operation command.
     async fn decode_operation_command(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        // Any packet addressed to us (including broadcasts) invalidates a pending POM write.
-        // The matching second packet of a write consumes it below.
-        let pending_pom_write = self.pending_pom_packet.take();
+        let instruction = match OperationModeInstruction::try_from(packet) {
+            Ok(instruction) => instruction,
+            Err(e) => {
+                // an invalid packet addressed to us invalidates a pending POM write
+                self.pending_pom_packet = None;
+                return Err(e.into());
+            }
+        };
 
-        match OperationModeInstruction::try_from(packet)? {
+        match instruction {
             OperationModeInstruction::CvAccess(access) => {
+                // Any CV access instruction invalidates a pending POM write. The matching second
+                // packet of a write consumes it in handle_pom.
+                //
+                // Speed and function instructions leave it pending: command stations interleave
+                // their periodic speed / function refresh for this decoder between the repeats
+                // of a POM write (observed with DCC-EX 5.6.6: POM, idle, speed, idle, POM, ...),
+                // so no two write packets would ever be adjacent.
+                let pending_pom_write = self.pending_pom_packet.take();
+
                 if !is_broadcast(packet) {
                     self.handle_pom(packet, access, pending_pom_write).await
                 } else {
@@ -160,8 +189,8 @@ where
         };
 
         // AcknowledgeCv is the service mode acknowledgement: a motor current pulse. On the main
-        // it would jolt a running loco, so only a reboot is passed on.
-        Ok(op.filter(|op| *op == Reboot))
+        // it would jolt a running loco, so only a reboot and a calibration run are passed on.
+        Ok(op.filter(|op| matches!(op, Reboot | Op::CalibrateMotor)))
     }
 
     async fn handle_service_mode(
@@ -211,7 +240,11 @@ where
     }
 
     async fn write_byte(&mut self, packet: &Packet) -> Result<Option<Op>, Error> {
-        self.write_cv(packet.cv_address()?, packet.cv_data()?).await
+        let op = self.write_cv(packet.cv_address()?, packet.cv_data()?).await?;
+
+        // The programming track cannot power a motor run, so a calibration request is
+        // refused: nothing is acknowledged.
+        Ok(op.filter(|op| *op != Op::CalibrateMotor))
     }
 
     /// Writes `value` to `cv`, applying the per-CV validation and side effects.
@@ -285,6 +318,19 @@ where
                     self.store
                         .write_byte(Cv::ExtendedAddressLsb as usize, value).await?;
                     return Ok(Some(AcknowledgeCv));
+                }
+
+                Cv::MotorCalibration => {
+                    // 1 starts a run and is not stored; the result is written once it finishes.
+                    // 0 clears the status. 2..=6 are status codes only the decoder writes.
+                    return match value {
+                        1 => Ok(Some(Op::CalibrateMotor)),
+                        0 => {
+                            self.store.write_byte(Cv::MotorCalibration as usize, 0).await?;
+                            Ok(Some(AcknowledgeCv))
+                        }
+                        _ => Err(PacketError::InvalidInstruction.into()),
+                    };
                 }
 
                 _ => true,
@@ -1248,7 +1294,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pom_write_invalidated_by_packet_to_us() {
+    fn test_pom_write_survives_speed_packet_to_us() {
         let mut harness = pom_harness();
         let packet = pom_write_packet(3, 0x42);
 
@@ -1259,17 +1305,15 @@ mod tests {
                 SpeedStep::Idx(10),
             ))
             .unwrap();
+        assert_eq!(harness.read_cv(3), 0, "one write packet must not write");
         harness.handle(&packet).unwrap();
 
+        // command stations interleave the speed refresh between the repeats of a write
         assert_eq!(
             harness.read_cv(3),
-            0,
-            "intervening packet must cancel the write"
+            0x42,
+            "an intervening speed packet must not cancel the write"
         );
-
-        // the write after the cancelled one acts as a new first packet
-        harness.handle(&packet).unwrap();
-        assert_eq!(harness.read_cv(3), 0x42);
     }
 
     #[test]
@@ -1290,7 +1334,7 @@ mod tests {
     }
 
     #[test]
-    fn test_pom_write_invalidated_by_broadcast() {
+    fn test_pom_write_survives_broadcast_speed_packet() {
         let mut harness = pom_harness();
         let packet = pom_write_packet(3, 0x42);
 
@@ -1300,7 +1344,7 @@ mod tests {
             .unwrap();
         harness.handle(&packet).unwrap();
 
-        assert_eq!(harness.read_cv(3), 0);
+        assert_eq!(harness.read_cv(3), 0x42);
     }
 
     #[test]
@@ -1471,5 +1515,92 @@ mod tests {
         harness.handle(&packet).unwrap();
         assert_eq!(harness.handle(&packet), Ok(Some(Reboot)));
         assert_eq!(harness.read_cv(Cv::EmfAdcOffset as usize), u8::MAX);
+    }
+
+    // Motor calibration (CV176)
+
+    const CALIBRATION_CV: u16 = Cv::MotorCalibration as u16;
+
+    #[test]
+    fn test_pom_calibration_start() {
+        let mut harness = TestHarness::with_store(
+            MockStore::new()
+                .with_cv(PrimaryAddress as u16, POM_ADDR)
+                .with_cv(CALIBRATION_CV, 3),
+        );
+        let packet = pom_write_packet(CALIBRATION_CV, 1);
+
+        assert_eq!(harness.handle(&packet), Ok(None), "first packet only latches");
+        assert_eq!(harness.handle(&packet), Ok(Some(Op::CalibrateMotor)));
+        assert_eq!(harness.read_cv(CALIBRATION_CV as usize), 3, "start is not stored");
+    }
+
+    #[test]
+    fn test_pom_calibration_clear_status() {
+        let mut harness = TestHarness::with_store(
+            MockStore::new()
+                .with_cv(PrimaryAddress as u16, POM_ADDR)
+                .with_cv(CALIBRATION_CV, 4),
+        );
+        let packet = pom_write_packet(CALIBRATION_CV, 0);
+
+        assert_eq!(harness.handle(&packet), Ok(None));
+        assert_eq!(harness.handle(&packet), Ok(None), "ack is filtered on the main");
+        assert_eq!(harness.read_cv(CALIBRATION_CV as usize), 0);
+    }
+
+    #[test]
+    fn test_pom_calibration_rejects_status_values() {
+        let invalid_err = Err(Error::Packet(PacketError::InvalidInstruction));
+
+        for value in [2, 3, 6, 7, 255] {
+            let mut harness = TestHarness::with_store(
+                MockStore::new()
+                    .with_cv(PrimaryAddress as u16, POM_ADDR)
+                    .with_cv(CALIBRATION_CV, 9),
+            );
+            let packet = pom_write_packet(CALIBRATION_CV, value);
+
+            assert_eq!(harness.handle(&packet), Ok(None));
+            assert_eq!(harness.handle(&packet), invalid_err, "value {value}");
+            assert_eq!(harness.read_cv(CALIBRATION_CV as usize), 9);
+        }
+    }
+
+    #[test]
+    fn test_service_calibration_start_refused() {
+        let mut harness = TestHarness::with_store(MockStore::new().with_cv(CALIBRATION_CV, 3));
+        harness.enter_service_mode();
+
+        let result = harness.send_two_packets(&service_write_packet(CALIBRATION_CV, 1));
+
+        assert_eq!(result, Ok(None), "no ack and no op");
+        assert_eq!(harness.read_cv(CALIBRATION_CV as usize), 3);
+    }
+
+    #[test]
+    fn test_service_calibration_clear_status() {
+        let mut harness = TestHarness::with_store(MockStore::new().with_cv(CALIBRATION_CV, 3));
+        harness.enter_service_mode();
+
+        let result = harness.send_two_packets(&service_write_packet(CALIBRATION_CV, 0));
+
+        assert_eq!(result, Ok(Some(AcknowledgeCv)));
+        assert_eq!(harness.read_cv(CALIBRATION_CV as usize), 0);
+    }
+
+    #[test]
+    fn test_service_calibration_rejects_status_values() {
+        let invalid_err = Err(Error::Packet(PacketError::InvalidInstruction));
+
+        for value in [2, 3, 6, 7, 255] {
+            let mut harness = TestHarness::with_store(MockStore::new().with_cv(CALIBRATION_CV, 9));
+            harness.enter_service_mode();
+
+            let result = harness.send_two_packets(&service_write_packet(CALIBRATION_CV, value));
+
+            assert_eq!(result, invalid_err, "value {value}");
+            assert_eq!(harness.read_cv(CALIBRATION_CV as usize), 9);
+        }
     }
 }

@@ -3,6 +3,7 @@ use crate::speed::startup::ComputeResult;
 use embassy_time::Duration;
 
 pub mod accel;
+pub mod calibration;
 mod pid;
 mod startup;
 pub mod table;
@@ -11,7 +12,7 @@ pub use pid::Config as PidConfig;
 pub use startup::Config as StartupConfig;
 
 /// When the corrected measured BEMF voltage is above this value, the controller switches to PID mode.
-const CONTROLLER_HANDOVER: f32 = 7.5f32;
+pub(crate) const CONTROLLER_HANDOVER: f32 = 7.5f32;
 
 /// Below this BEMF measured voltage, the motor is considered stalling
 /// and we'll revert to startup mode.

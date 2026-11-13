@@ -162,6 +162,22 @@ pub trait StoreExt {
 
     async fn speed_step_period(&self) -> Result<Duration, Error>;
 
+    /// Calibration headroom as a fraction (CV179 / 255).
+    async fn motor_calibration_headroom(&self) -> Result<f32, Error>;
+
+    /// Stores the status of a calibration run that did not produce a result.
+    async fn write_motor_calibration_status(&mut self, status: u8) -> Result<(), Error>;
+
+    /// Stores a successful calibration: the measured emf_max (CV177-178, big-endian),
+    /// the new CV5 / CV6, and `status` in CV176. The status is written last.
+    async fn write_motor_calibration_result(
+        &mut self,
+        emf_max: u16,
+        v_high: u8,
+        v_mid: u8,
+        status: u8,
+    ) -> Result<(), Error>;
+
     /// Returns the GPIO PWM enable mask derived from CV_112..CV_115.
     async fn pwm_enabled_mask(&self) -> Result<u32, Error>;
 
@@ -292,6 +308,27 @@ impl<T: Store> StoreExt for T {
 
     async fn speed_step_period(&self) -> Result<Duration, Error> {
         self.read_byte(SpeedStepPeriod as usize).await.map(|ms| Duration::from_millis(ms as u64))
+    }
+
+    async fn motor_calibration_headroom(&self) -> Result<f32, Error> {
+        self.read_byte(MotorCalibrationHeadroom as usize).await.map(|h| h as f32 / 255.0)
+    }
+
+    fn write_motor_calibration_status(&mut self, status: u8) -> impl Future<Output = Result<(), Error>> {
+        self.write_byte(MotorCalibration as usize, status)
+    }
+
+    async fn write_motor_calibration_result(
+        &mut self,
+        emf_max: u16,
+        v_high: u8,
+        v_mid: u8,
+        status: u8,
+    ) -> Result<(), Error> {
+        self.write_bytes(MotorCalibrationEmfMax as usize, &emf_max.to_be_bytes(), false).await?;
+        self.write_byte(VHigh as usize, v_high).await?;
+        self.write_byte(VMid as usize, v_mid).await?;
+        self.write_byte(MotorCalibration as usize, status).await
     }
 
     fn pwm_enabled_mask(&self) -> impl Future<Output = Result<u32, Error>> {
@@ -431,5 +468,40 @@ mod tests {
 
         // after a reset we should have the default address of 3
         assert_eq!(block_on(store.addr()), Ok(3));
+    }
+
+    #[test]
+    fn test_motor_calibration_defaults() {
+        let mut store = MockStore::new();
+        block_on(reset(&mut store)).unwrap();
+
+        assert_eq!(block_on(store.read_cv::<u8>(Cv::MotorCalibration as usize)), Ok(0));
+        assert_eq!(block_on(store.read_cv::<u16>(Cv::MotorCalibrationEmfMax as usize)), Ok(0));
+        assert_eq!(block_on(store.read_cv::<u8>(Cv::MotorCalibrationHeadroom as usize)), Ok(235));
+        assert_eq!(block_on(store.motor_calibration_headroom()), Ok(235.0 / 255.0));
+    }
+
+    #[test]
+    fn test_write_motor_calibration_result() {
+        let mut store = MockStore::new();
+
+        block_on(store.write_motor_calibration_result(0x0226, 120, 60, 2)).unwrap();
+
+        assert_eq!(block_on(store.read_byte(Cv::MotorCalibrationEmfMax as usize)), Ok(0x02));
+        assert_eq!(block_on(store.read_byte(Cv::MotorCalibrationEmfMax as usize + 1)), Ok(0x26));
+        assert_eq!(block_on(store.read_cv::<u16>(Cv::MotorCalibrationEmfMax as usize)), Ok(0x0226));
+        assert_eq!(block_on(store.v_high()), Ok(120));
+        assert_eq!(block_on(store.v_mid()), Ok(60));
+        assert_eq!(block_on(store.read_byte(Cv::MotorCalibration as usize)), Ok(2));
+    }
+
+    #[test]
+    fn test_write_motor_calibration_status() {
+        let mut store = MockStore::new().with_cv(Cv::VHigh as u16, 7);
+
+        block_on(store.write_motor_calibration_status(4)).unwrap();
+
+        assert_eq!(block_on(store.read_byte(Cv::MotorCalibration as usize)), Ok(4));
+        assert_eq!(block_on(store.v_high()), Ok(7), "CV5 untouched");
     }
 }

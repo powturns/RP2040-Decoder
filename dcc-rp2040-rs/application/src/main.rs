@@ -5,6 +5,7 @@
 pub(crate) mod log;
 
 mod functions;
+mod handler;
 mod motor;
 mod store;
 mod timer;
@@ -23,16 +24,17 @@ use panic_reset as _;
 use defmt_rtt as _;
 
 // use crate::transport::Decoder;
-use crate::motor::{Command, MotorDriver, RpMotorDriver};
+use crate::motor::{MotorDriver, RpMotorDriver};
 use crate::timer::InstantTimer;
 use crate::transport::pio_decoder::PioDccDecoder;
 use ::dcc::transport::{Decoder, packet::Packet};
+use ::motor::speed::calibration;
 use ::motor::speed::{
     Config as SpeedConfig, Controller as SpeedController, PidConfig, StartupConfig, accel,
 };
 use assign_resources::assign_resources;
 use dcc::cv::store::{Store, StoreExt, ensure_populated, reset};
-use dcc::handler::{Handler, Op};
+use dcc::handler::Handler;
 use embassy_executor::Spawner;
 use embassy_rp::adc;
 use embassy_rp::adc::Adc;
@@ -45,7 +47,6 @@ use embassy_rp::{Peri, bind_interrupts, peripherals};
 use embassy_sync::blocking_mutex::raw::ThreadModeRawMutex;
 use embassy_sync::channel::Channel;
 use embassy_sync::pubsub::{PubSubBehavior, PubSubChannel};
-use functions::handler::Handler as FunctionGroupHandler;
 
 const FLASH_SIZE: usize = 2 * 1024 * 1024;
 
@@ -54,8 +55,6 @@ include!(concat!(env!("OUT_DIR"), "/flash_consts.rs"));
 
 type RawDecoder = PioDccDecoder<'static, PIO0, 0>;
 type AppFlash = Flash<'static, FLASH, Async, FLASH_SIZE>;
-
-type Packethandler = Handler<InstantTimer, store::CvStore>;
 
 bind_interrupts!(struct Irqs {
     PIO0_IRQ_0 => pio::InterruptHandler<PIO0>;
@@ -134,60 +133,6 @@ async fn packet_decoder(/*mut watchdog: Watchdog,*/ mut decoder: Decoder<RawDeco
     }
 }
 
-#[embassy_executor::task]
-async fn packet_handler(mut handler: Packethandler, mut fg_handler: FunctionGroupHandler) {
-    trace!("starting packet handler loop");
-
-    let mut receiver = unwrap!(PACKET_CHANNEL.subscriber());
-
-    let mut last_command: Option<Op> = None;
-
-    loop {
-        // TODO: if a packet hasn't been received within a heartbeat timeout
-        //       we should execute a reset operation.
-        //       We should probably do the same if we haven received a packet addressed to us
-        //       in a while
-        let packet = receiver.next_message_pure().await;
-
-        if cfg!(feature = "verbose-transport") {
-            trace!("handling packet: {:?}", packet);
-        }
-
-        let op = handler.handle(&packet).await;
-
-        if cfg!(feature = "verbose-transport") {
-            trace!("packet result: {:?}", op);
-        }
-
-        match op {
-            Ok(Some(op)) => {
-                match op {
-                    Op::AcknowledgeCv => MOTOR_CHANNEL.send(Command::AcknowledgeCv).await,
-                    Op::Reset => MOTOR_CHANNEL.send(Command::Reset).await,
-                    Op::Velocity128(sp) => {
-                        if last_command != Some(op) {
-                            // only send the velocity command if something changed. This prevents
-                            // unnecessary work from being performed downstream
-                            MOTOR_CHANNEL.send(Command::SetVelocity128(sp)).await;
-
-                            fg_handler.set_direction(sp.direction);
-                        }
-                    }
-                    Op::SetFunctions(fg) => fg_handler.handle(fg),
-                    Op::Reboot => {
-                        cortex_m::peripheral::SCB::sys_reset();
-                    }
-                }
-                last_command = Some(op);
-            }
-            Ok(None) => { /* noop */ }
-            Err(e) => {
-                error!("error handling packet: {:?} {:?}", e, packet);
-            }
-        }
-    }
-}
-
 #[embassy_executor::main]
 async fn main(spawner: Spawner) {
     info!("dcc-rp2040-rs startup!");
@@ -241,7 +186,7 @@ async fn main(spawner: Spawner) {
 
     let motor_pwm_frequency = unwrap!(cv_store.motor_pwm_frequency().await);
     debug!("motor_pwm_frequency={}", motor_pwm_frequency);
-    let output_max = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency)
+    let pwm_max_output = (embassy_rp::clocks::clk_sys_freq() / motor_pwm_frequency)
         .saturating_sub(1) // subtract 1,  otherwise the PWM counts one too many per period
         .min(u16::MAX.into()) as u16;
 
@@ -249,7 +194,7 @@ async fn main(spawner: Spawner) {
         let adc = Adc::new(p.ADC, Irqs, adc::Config::default());
 
         let config = motor::Config {
-            pwm_max_output: output_max,
+            pwm_max_output,
             pwm_clk_divider: fixed::FixedU16::from_num(
                 unwrap!(cv_store.motor_pwm_divider().await) as u16
             ),
@@ -308,7 +253,7 @@ async fn main(spawner: Spawner) {
         table::build(config)
     };
 
-    // The period the motor task ticks at, shared by the PID controller and the driver.
+    // The period the motor task ticks at, shared by the PID controller and calibration.
     let pid_sample_time = unwrap!(cv_store.pid_sample_time().await);
 
     let speed_control = {
@@ -318,7 +263,7 @@ async fn main(spawner: Spawner) {
                 filter_tc: unwrap!(cv_store.pid_filter_tc().await),
                 ki: unwrap!(cv_store.pid_ki().await),
                 kd: unwrap!(cv_store.pid_kd().await),
-                output_max,
+                output_max: pwm_max_output,
                 kp_gain_range1_end: unwrap!(cv_store.pid_kp_gain_range1_end().await),
                 kp_y0: unwrap!(cv_store.pid_kp_y0().await),
                 kp_y1: unwrap!(cv_store.pid_kp_y1().await),
@@ -326,7 +271,7 @@ async fn main(spawner: Spawner) {
                 max_setpoint: *unwrap!(speed_table.last()) as f32,
             },
             StartupConfig {
-                output_max,
+                output_max: pwm_max_output,
                 pid_ff: unwrap!(cv_store.pid_k_ff().await),
             },
             adc_offset as f32,
@@ -368,7 +313,7 @@ async fn main(spawner: Spawner) {
     // );
 
     spawner.spawn(unwrap!(packet_decoder(/*watchdog,*/ decoder)));
-    spawner.spawn(unwrap!(packet_handler(ph, fg_handler)));
+    spawner.spawn(unwrap!(handler::packet_handler(ph, fg_handler)));
     motor::driver::spawn(
         spawner,
         pid_sample_time,
@@ -376,5 +321,10 @@ async fn main(spawner: Spawner) {
         speed_control,
         accel_helper,
         speed_table,
+        calibration::Config {
+            output_max: pwm_max_output,
+            sample_time: pid_sample_time,
+            adc_offset: adc_offset as f32,
+        },
     );
 }

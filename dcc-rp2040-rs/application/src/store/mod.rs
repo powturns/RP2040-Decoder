@@ -24,7 +24,8 @@ mod selected {
     use dcc::cv::store::Error;
 
     /// The CV store selected by the `cv-store-raw-flash` feature.
-    pub type CvStore = super::flash::Flash<'static, embassy_rp::peripherals::FLASH, { crate::FLASH_SIZE }>;
+    pub type CvStore =
+        super::flash::Flash<'static, embassy_rp::peripherals::FLASH, { crate::FLASH_SIZE }>;
 
     /// Creates the CV store in the `CV_FLASH` region, loading the persisted CVs.
     pub async fn new(flash: AppFlash) -> Result<CvStore, Error> {
